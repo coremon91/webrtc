@@ -118,23 +118,26 @@
       let micStreamL = null;
       let micStreamR = null;
 
-      const iceServers = [
-        { urls: "stun:stun.l.google.com:19302" },
-        {
-          urls: "turn:43.201.22.7:3478?transport=udp",
-          username: "webrtcuser",
-          credential: "webrtcpassword",
-        },
-        {
-          urls: "turn:43.201.22.7:3478?transport=tcp",
-          username: "webrtcuser",
-          credential: "webrtcpassword",
-        },
-      ];
       const rtcConfig = {
-        iceServers,
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
         iceTransportPolicy: "all",
       };
+      let turnCredentialsExpiresAt = 0;
+
+      async function loadIceServers() {
+        if (Date.now() < turnCredentialsExpiresAt - 60_000) return;
+        const res = await fetch(
+          `/api/rooms/${encodeURIComponent(ROOM_ID)}/turn-credentials`,
+          { credentials: "same-origin", cache: "no-store" }
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !Array.isArray(data.iceServers)) {
+          throw new Error(data.error || "TURN credentials request failed");
+        }
+        rtcConfig.iceServers = data.iceServers;
+        turnCredentialsExpiresAt = Date.parse(data.expiresAt) || Date.now();
+        log("ICE servers updated (Google STUN + private TURN)");
+      }
 
       function readTargetFromUi() {
         const res = ($("videoResolution").value || "640x360").split("x");
@@ -491,6 +494,7 @@
         }
         btnStart.disabled = true;
         try {
+          await loadIceServers();
           if (!localStream) {
             localStream = await getMedia();
           }
@@ -531,6 +535,12 @@
       socket.on("viewer_joined", async ({ viewerSocketId }) => {
         if (!localStream || !joinedRoomId) return;
         log(`viewer joined: ${viewerSocketId}`);
+        try {
+          await loadIceServers();
+        } catch (e) {
+          log(`ERROR: ${e.message || e}`);
+          return;
+        }
         const pc = ensurePc(viewerSocketId);
         preferH264VideoSend(pc);
         const offer = await pc.createOffer({

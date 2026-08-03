@@ -182,20 +182,26 @@
         maxFramerate: 30,
       };
 
-      const iceServers = [
-        { urls: "stun:stun.l.google.com:19302" },
-        {
-          urls: "turn:43.201.22.7:3478?transport=udp",
-          username: "webrtcuser",
-          credential: "webrtcpassword",
-        },
-        {
-          urls: "turn:43.201.22.7:3478?transport=tcp",
-          username: "webrtcuser",
-          credential: "webrtcpassword",
-        },
-      ];
-      const rtcConfig = { iceServers, iceTransportPolicy: "all" };
+      const rtcConfig = {
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+        iceTransportPolicy: "all",
+      };
+      let turnCredentialsExpiresAt = 0;
+
+      async function loadIceServers() {
+        if (Date.now() < turnCredentialsExpiresAt - 60_000) return;
+        const res = await fetch(
+          `/api/rooms/${encodeURIComponent(ROOM_ID)}/turn-credentials`,
+          { credentials: "same-origin", cache: "no-store" }
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !Array.isArray(data.iceServers)) {
+          throw new Error(data.error || "TURN credentials request failed");
+        }
+        rtcConfig.iceServers = data.iceServers;
+        turnCredentialsExpiresAt = Date.parse(data.expiresAt) || Date.now();
+        log("ICE servers updated (Google STUN + private TURN)");
+      }
 
       function log(line) {
         statusEl.textContent = `${new Date().toLocaleTimeString()}  ${line}\n` + statusEl.textContent;
@@ -613,6 +619,7 @@
         }
         btnJoin.disabled = true;
         try {
+          await loadIceServers();
           if (!socket.connected) socket.connect();
           joinedRoomId = ROOM_ID;
           socket.emit("join", { roomId: joinedRoomId, role: "viewer" });

@@ -8,6 +8,7 @@ npm-debug.log*
 *.pem
 *.key
 *.crt
+infra/coturn/certs/
 
 webrtc-lowlatency-p2p/
 webrtc-lowlatency-p2p(05.20)/

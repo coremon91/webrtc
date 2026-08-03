@@ -1,0 +1,19 @@
+services:
+  coturn:
+    image: coturn/coturn:4.16.0-r0
+    container_name: webrtc-coturn
+    restart: unless-stopped
+    network_mode: host
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/lib/coturn
+    volumes:
+      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
+      - ${TURN_TLS_CERT_PATH:?Set TURN_TLS_CERT_PATH}:/etc/coturn/certs/fullchain.pem:ro
+      - ${TURN_TLS_KEY_PATH:?Set TURN_TLS_KEY_PATH}:/etc/coturn/certs/privkey.pem:ro
+    command:
+      - --config=/etc/coturn/turnserver.conf
+      - --external-ip=${TURN_EXTERNAL_IP:?Set TURN_EXTERNAL_IP}
+      - --realm=${TURN_REALM:?Set TURN_REALM}
+      - --static-auth-secret=${TURN_SHARED_SECRET:?Set TURN_SHARED_SECRET}

@@ -11,6 +11,11 @@ const ADMIN_PASS = process.env.ADMIN_PASS || "kbcwebrtc";
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || "0.0.0.0";
 
+const TURN_DOMAIN = String(process.env.TURN_DOMAIN || "").trim();
+const TURN_SHARED_SECRET = String(process.env.TURN_SHARED_SECRET || "");
+const requestedTurnTtl = Number.parseInt(process.env.TURN_TTL_SECONDS, 10) || 3600;
+const TURN_TTL_SECONDS = Math.min(Math.max(requestedTurnTtl, 60), 86400);
+
 const app = express();
 app.use(express.json());
 
@@ -95,7 +100,7 @@ function ensureSession(req, res) {
   let session = sid ? sessions.get(sid) : null;
   if (!session) {
     sid = crypto.randomBytes(18).toString("hex");
-    session = { isAdmin: false, allowedRooms: new Set() };
+    session = { id: sid, isAdmin: false, allowedRooms: new Set() };
     sessions.set(sid, session);
     res.setHeader(
       "Set-Cookie",
@@ -252,6 +257,60 @@ app.post("/api/rooms/:roomId/auth", (req, res) => {
   }
   req.session.allowedRooms.add(roomId);
   res.json({ ok: true, mode: "room" });
+});
+
+function getTurnHost() {
+  if (!TURN_DOMAIN) return null;
+  const value = TURN_DOMAIN.replace(/^turns?:\/\//i, "").replace(/\/+$/, "");
+  if (!/^[a-z0-9.-]+$/i.test(value)) return null;
+  return value;
+}
+
+app.get("/api/rooms/:roomId/turn-credentials", (req, res) => {
+  const { roomId } = req.params;
+  if (!rooms.has(roomId)) {
+    return res.status(404).json({ ok: false, error: "room not found" });
+  }
+  if (!req.session.isAdmin && !req.session.allowedRooms.has(roomId)) {
+    return res.status(401).json({ ok: false, error: "room authorization required" });
+  }
+
+  const turnHost = getTurnHost();
+  if (!turnHost || !TURN_SHARED_SECRET) {
+    return res.status(503).json({ ok: false, error: "TURN service is not configured" });
+  }
+
+  const expiresAt = Math.floor(Date.now() / 1000) + TURN_TTL_SECONDS;
+  const sessionId = req.session.id || crypto.randomBytes(18).toString("hex");
+  const identity = crypto
+    .createHash("sha256")
+    .update(sessionId)
+    .digest("hex")
+    .slice(0, 16);
+  const username = `${expiresAt}:${identity}`;
+  const credential = crypto
+    .createHmac("sha1", TURN_SHARED_SECRET)
+    .update(username)
+    .digest("base64");
+
+  res.setHeader("Cache-Control", "no-store");
+  res.json({
+    ok: true,
+    expiresAt: new Date(expiresAt * 1000).toISOString(),
+    ttl: TURN_TTL_SECONDS,
+    iceServers: [
+      { urls: "stun:stun.l.google.com:19302" },
+      {
+        urls: [
+          `turn:${turnHost}:3478?transport=udp`,
+          `turn:${turnHost}:3478?transport=tcp`,
+          `turns:${turnHost}:5349?transport=tcp`,
+        ],
+        username,
+        credential,
+      },
+    ],
+  });
 });
 
 app.get("/", requireLocalhost, (req, res) => {
@@ -453,6 +512,11 @@ io.on("connection", (socket) => {
 server.listen(PORT, HOST, () => {
   const displayHost = HOST === "0.0.0.0" || HOST === "::" ? "localhost" : HOST;
   console.log(`Signaling server listening on http://${displayHost}:${PORT}`);
+  if (!getTurnHost() || !TURN_SHARED_SECRET) {
+    console.warn(
+      "[turn] TURN_DOMAIN or TURN_SHARED_SECRET is missing; WebRTC joins will be rejected."
+    );
+  }
   console.log(
     `관리자 UI는 이 PC에서만: http://localhost:${PORT}/login  (${ADMIN_USER} / ${ADMIN_PASS})`
   );

@@ -1,0 +1,735 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Watch • Low-latency P2P</title>
+    <link rel="stylesheet" href="/style.css" />
+    <style>
+      .room-pill {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+      }
+      .gate {
+        position: fixed;
+        inset: 0;
+        background: rgba(8, 12, 26, 0.85);
+        backdrop-filter: blur(6px);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        z-index: 40;
+      }
+      .gate.show {
+        display: flex;
+      }
+      .gate-card {
+        background: rgba(20, 24, 48, 0.95);
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 16px;
+        padding: 24px;
+        width: min(420px, 92vw);
+      }
+      .gate-card h2 {
+        margin: 0 0 4px;
+        font-size: 18px;
+      }
+      .gate-card .sub {
+        opacity: 0.75;
+        font-size: 13px;
+        margin-bottom: 14px;
+      }
+      .tabs {
+        display: flex;
+        gap: 6px;
+        margin-bottom: 12px;
+      }
+      .tab {
+        flex: 1;
+        text-align: center;
+        padding: 8px 10px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        cursor: pointer;
+        font-size: 13px;
+      }
+      .tab[aria-selected="true"] {
+        background: linear-gradient(135deg, rgba(101, 138, 255, 0.6), rgba(162, 88, 255, 0.35));
+        border-color: rgba(190, 200, 255, 0.24);
+      }
+      .gate-form label {
+        display: block;
+        margin-bottom: 10px;
+      }
+      .gate-form label span {
+        display: block;
+        font-size: 12px;
+        opacity: 0.85;
+        margin-bottom: 4px;
+      }
+      .gate-form input {
+        width: 100%;
+      }
+      .gate-actions {
+        display: flex;
+        justify-content: flex-end;
+        margin-top: 8px;
+      }
+      .error {
+        color: #ff9a9a;
+        font-size: 13px;
+        min-height: 18px;
+        margin-top: 4px;
+      }
+      .hidden {
+        display: none !important;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="row" style="justify-content: space-between; margin-bottom: 12px">
+        <div>
+          <div style="font-size: 18px; font-weight: 650">시청자 (Viewer)</div>
+          <div class="row" style="gap: 8px; margin-top: 6px">
+            <div class="pill">WebRTC • P2P</div>
+            <div class="pill room-pill">room: <span id="roomIdPill">-</span></div>
+            <div class="pill">Viewers: <span id="viewerCount">-</span></div>
+            <div class="pill">RTT: <span id="metricRtt">-</span></div>
+            <div class="pill">Loss: <span id="metricLoss">-</span></div>
+            <div class="pill">Jitter: <span id="metricJitter">-</span></div>
+          </div>
+          <div id="roomTitle" style="opacity: 0.8; font-size: 13px; margin-top: 6px"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="row">
+          <button id="btnJoin" disabled>접속</button>
+          <button id="btnLeave" disabled>나가기</button>
+          <button id="btnMic" type="button" disabled>마이크 켜기</button>
+          <button id="btnFullscreen">전체화면</button>
+        </div>
+      </div>
+
+      <div class="grid">
+        <div class="card">
+          <video id="remote" playsinline webkit-playsinline></video>
+        </div>
+        <div class="card">
+          <div class="meta" id="status">Idle</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Auth gate -->
+    <div class="gate" id="gate">
+      <div class="gate-card">
+        <h2>방 접속 인증</h2>
+        <div class="sub" id="gateSub">이 방에 접속하려면 인증이 필요합니다.</div>
+
+        <form id="passForm" class="gate-form">
+          <label>
+            <span>방 비밀번호</span>
+            <input id="roomPassword" type="password" autocomplete="off" />
+          </label>
+          <div class="error" id="passErr"></div>
+          <div class="gate-actions">
+            <button type="submit">접속</button>
+          </div>
+        </form>
+
+      </div>
+    </div>
+
+    <script src="https://cdn.socket.io/4.8.3/socket.io.min.js"></script>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const statusEl = $("status");
+      const btnJoin = $("btnJoin");
+      const btnLeave = $("btnLeave");
+      const btnMic = $("btnMic");
+      const btnFullscreen = $("btnFullscreen");
+      const remoteVideo = $("remote");
+      const viewerCountEl = $("viewerCount");
+      const metricRttEl = $("metricRtt");
+      const metricLossEl = $("metricLoss");
+      const metricJitterEl = $("metricJitter");
+      const roomIdPill = $("roomIdPill");
+      const roomTitleEl = $("roomTitle");
+      const gateEl = $("gate");
+      const gateSub = $("gateSub");
+
+      const ROOM_ID = (() => {
+        const parts = location.pathname.split("/").filter(Boolean);
+        return parts.length >= 2 && parts[0] === "watch" ? parts[1] : "";
+      })();
+      roomIdPill.textContent = ROOM_ID ? `${ROOM_ID.slice(0, 8)}…` : "(none)";
+
+      const socket = io({ autoConnect: false });
+      let pc = null;
+      let joinedRoomId = null;
+      let senderSocketId = null;
+      let isAuthorized = false;
+      let micOn = false;
+      let micStream = null;
+
+      const TARGET = {
+        maxBitrateBps: 900_000,
+        width: 640,
+        height: 360,
+        maxFramerate: 30,
+      };
+
+      const iceServers = [
+        { urls: "stun:stun.l.google.com:19302" },
+        {
+          urls: "turn:43.201.22.7:3478?transport=udp",
+          username: "webrtcuser",
+          credential: "webrtcpassword",
+        },
+        {
+          urls: "turn:43.201.22.7:3478?transport=tcp",
+          username: "webrtcuser",
+          credential: "webrtcpassword",
+        },
+      ];
+      const rtcConfig = { iceServers, iceTransportPolicy: "all" };
+
+      function log(line) {
+        statusEl.textContent = `${new Date().toLocaleTimeString()}  ${line}\n` + statusEl.textContent;
+      }
+
+      function orderH264First(codecs) {
+        if (!codecs || !codecs.length) return codecs;
+        const h264 = codecs.filter((c) => /h264/i.test(c.mimeType || ""));
+        const rest = codecs.filter((c) => !/h264/i.test(c.mimeType || ""));
+        return h264.length ? h264.concat(rest) : codecs;
+      }
+
+      function preferH264VideoReceive(pc) {
+        if (!window.RTCRtpReceiver?.getCapabilities) return false;
+        const caps = RTCRtpReceiver.getCapabilities("video");
+        if (!caps?.codecs?.length) return false;
+        const prefs = orderH264First(caps.codecs);
+        for (const t of pc.getTransceivers()) {
+          if (t.receiver?.track?.kind === "video" && t.setCodecPreferences) {
+            t.setCodecPreferences(prefs);
+            return true;
+          }
+        }
+        const recv = pc.getTransceivers().filter((t) => {
+          const d = t.direction || t.currentDirection || "";
+          return /recvonly|sendrecv/.test(d);
+        });
+        const videoTx = recv.length >= 2 ? recv[recv.length - 1] : recv[0];
+        if (videoTx?.setCodecPreferences) {
+          videoTx.setCodecPreferences(prefs);
+          return true;
+        }
+        return false;
+      }
+
+      // ---- Auth gate ----
+      function showGate(show) {
+        gateEl.classList.toggle("show", show);
+      }
+
+      async function authWithRoomPassword(roomPassword) {
+        const res = await fetch(`/api/rooms/${encodeURIComponent(ROOM_ID)}/auth`, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ roomPassword: roomPassword || "" }),
+        });
+        const data = await res.json().catch(() => ({}));
+        return res.ok && data.ok;
+      }
+
+      async function fetchRoomInfo() {
+        const res = await fetch(`/api/rooms/${encodeURIComponent(ROOM_ID)}/info`, {
+          credentials: "same-origin",
+        });
+        if (res.status === 404) {
+          log("ERROR: 존재하지 않는 방입니다.");
+          gateSub.textContent = "이 방은 존재하지 않거나 종료되었습니다.";
+          showGate(true);
+          $("passForm").classList.add("hidden");
+          return null;
+        }
+        const data = await res.json().catch(() => ({}));
+        if (!data.ok) return null;
+        return data;
+      }
+
+      async function ensureAuthorized() {
+        const info = await fetchRoomInfo();
+        if (!info) return false;
+        if (info.title) roomTitleEl.textContent = `제목: ${info.title}`;
+
+        if (info.isAllowed) {
+          showGate(false);
+          isAuthorized = true;
+          btnJoin.disabled = false;
+          log("인증됨 — [접속] 버튼을 눌러 주세요");
+          return true;
+        }
+
+        if (!info.hasPassword) {
+          if (await authWithRoomPassword("")) {
+            isAuthorized = true;
+            showGate(false);
+            btnJoin.disabled = false;
+            log("인증 완료 — [접속] 버튼을 눌러 주세요");
+            return true;
+          }
+        }
+
+        gateSub.textContent = info.hasPassword
+          ? "방 비밀번호를 입력하세요."
+          : "접속할 수 없습니다. 관리자에게 문의하세요.";
+        showGate(true);
+        return false;
+      }
+
+      $("passForm").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const errEl = $("passErr");
+        errEl.textContent = "";
+        const roomPassword = $("roomPassword").value;
+        if (!(await authWithRoomPassword(roomPassword))) {
+          errEl.textContent = "비밀번호가 올바르지 않습니다.";
+          return;
+        }
+        isAuthorized = true;
+        showGate(false);
+        btnJoin.disabled = false;
+        log("인증 완료 — [접속] 버튼을 눌러 주세요");
+      });
+
+      // ---- WebRTC ----
+      async function getVideoCodecLineFromStats(pc) {
+        try {
+          const stats = await pc.getStats();
+          let inboundVideo = null;
+          let codec = null;
+          stats.forEach((s) => {
+            if (s.type === "inbound-rtp" && s.kind === "video" && !s.isRemote) {
+              inboundVideo = inboundVideo ? (s.bytesReceived > inboundVideo.bytesReceived ? s : inboundVideo) : s;
+            }
+          });
+          if (inboundVideo && inboundVideo.codecId) codec = stats.get(inboundVideo.codecId);
+          const mime = codec?.mimeType || codec?.codec || null;
+          const dec = inboundVideo?.decoderImplementation || null;
+          const parts = [];
+          if (mime) parts.push(`codec=${mime}`);
+          if (dec) parts.push(`decoder=${dec}`);
+          return parts.length ? parts.join("  ") : null;
+        } catch {
+          return null;
+        }
+      }
+
+      function startCodecPoll(pc) {
+        let last = null;
+        const id = setInterval(async () => {
+          if (pc.connectionState === "closed") return;
+          const line = await getVideoCodecLineFromStats(pc);
+          if (line && line !== last) {
+            last = line;
+            log(line);
+          }
+        }, 2000);
+        pc.addEventListener("connectionstatechange", () => {
+          if (pc.connectionState === "closed" || pc.connectionState === "failed") clearInterval(id);
+        });
+      }
+
+      function startInboundQualityPoll(pc) {
+        let lastBytes = 0;
+        let lastTs = 0;
+        const id = setInterval(async () => {
+          if (pc.connectionState === "closed") return;
+          try {
+            const stats = await pc.getStats();
+            let inboundVideo = null;
+            stats.forEach((s) => {
+              if (s.type === "inbound-rtp" && s.kind === "video" && !s.isRemote) {
+                inboundVideo = inboundVideo
+                  ? s.bytesReceived > inboundVideo.bytesReceived
+                    ? s
+                    : inboundVideo
+                  : s;
+              }
+            });
+            if (!inboundVideo) return;
+            const bytes = inboundVideo.bytesReceived || 0;
+            const ts = inboundVideo.timestamp || 0;
+            let kbps = null;
+            if (lastTs && ts > lastTs) {
+              kbps = (((bytes - lastBytes) * 8) / ((ts - lastTs) / 1000)) / 1000;
+            }
+            lastBytes = bytes;
+            lastTs = ts;
+            const w = inboundVideo.frameWidth || "?";
+            const h = inboundVideo.frameHeight || "?";
+            const fps = inboundVideo.framesPerSecond || "?";
+            const br = kbps ? `${Math.round(kbps)}kbps` : "?kbps";
+            log(
+              `recv: ${w}x${h} @ ${fps}fps  bitrate≈${br}  (target ${TARGET.width}x${TARGET.height} @ ${TARGET.maxFramerate}fps, ${Math.round(
+                TARGET.maxBitrateBps / 1000
+              )}kbps)`
+            );
+          } catch {}
+        }, 4000);
+        pc.addEventListener("connectionstatechange", () => {
+          if (pc.connectionState === "closed" || pc.connectionState === "failed") clearInterval(id);
+        });
+      }
+
+      function startHealthPoll(pc) {
+        let lastAudioLost = null;
+        let lastVideoLost = null;
+        const id = setInterval(async () => {
+          if (pc.connectionState === "closed") return;
+          try {
+            const stats = await pc.getStats();
+            let rttMs = null;
+            stats.forEach((s) => {
+              if (s.type === "candidate-pair" && s.state === "succeeded" && s.nominated) {
+                if (typeof s.currentRoundTripTime === "number") rttMs = s.currentRoundTripTime * 1000;
+              }
+            });
+            metricRttEl.textContent = rttMs == null ? "-" : `${Math.round(rttMs)}ms`;
+
+            let inboundAudio = null;
+            let inboundVideo = null;
+            stats.forEach((s) => {
+              if (s.type === "inbound-rtp" && !s.isRemote && s.kind === "audio") inboundAudio = s;
+              if (s.type === "inbound-rtp" && !s.isRemote && s.kind === "video") inboundVideo = s;
+            });
+            const jitterS =
+              typeof inboundAudio?.jitter === "number"
+                ? inboundAudio.jitter
+                : typeof inboundVideo?.jitter === "number"
+                ? inboundVideo.jitter
+                : null;
+            metricJitterEl.textContent = jitterS == null ? "-" : `${Math.round(jitterS * 1000)}ms`;
+
+            const aLost = typeof inboundAudio?.packetsLost === "number" ? inboundAudio.packetsLost : null;
+            const vLost = typeof inboundVideo?.packetsLost === "number" ? inboundVideo.packetsLost : null;
+            const dA = aLost == null || lastAudioLost == null ? null : aLost - lastAudioLost;
+            const dV = vLost == null || lastVideoLost == null ? null : vLost - lastVideoLost;
+            lastAudioLost = aLost == null ? lastAudioLost : aLost;
+            lastVideoLost = vLost == null ? lastVideoLost : vLost;
+
+            const parts = [];
+            if (dA != null) parts.push(`A+${dA}`);
+            if (dV != null) parts.push(`V+${dV}`);
+            metricLossEl.textContent = parts.length ? parts.join(" ") : "-";
+          } catch {}
+        }, 2000);
+        pc.addEventListener("connectionstatechange", () => {
+          if (pc.connectionState === "closed" || pc.connectionState === "failed") clearInterval(id);
+        });
+      }
+
+      function stopViewerMic() {
+        micOn = false;
+        if (micStream) {
+          micStream.getTracks().forEach((t) => t.stop());
+          micStream = null;
+        }
+        if (pc) {
+          const audioSender = pc.getSenders().find((s) => s.track && s.track.kind === "audio");
+          if (audioSender) audioSender.track.enabled = false;
+        }
+        btnMic.textContent = "마이크 켜기";
+        btnMic.classList.remove("mic-on");
+      }
+
+      function resetPc() {
+        stopViewerMic();
+        if (pc) pc.close();
+        pc = null;
+        remoteVideo.srcObject = null;
+        senderSocketId = null;
+        metricRttEl.textContent = "-";
+        metricLossEl.textContent = "-";
+        metricJitterEl.textContent = "-";
+        btnMic.disabled = true;
+      }
+
+      async function renegotiateWithSender() {
+        if (!pc || !senderSocketId || !joinedRoomId) return;
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        socket.emit("signal", {
+          roomId: joinedRoomId,
+          to: senderSocketId,
+          type: "sdp",
+          description: pc.localDescription,
+        });
+      }
+
+      /** UI는 켜져 있는데 송신 트랙이 끊긴 경우 복구 (다른 시청자 퇴장 등) */
+      async function repairViewerMicIfNeeded() {
+        if (!micOn || !pc || !senderSocketId) return;
+        if (pc.connectionState !== "connected") return;
+        try {
+          let track = micStream?.getAudioTracks()?.[0];
+          if (!track || track.readyState === "ended") {
+            if (micStream) micStream.getTracks().forEach((t) => t.stop());
+            micStream = await navigator.mediaDevices.getUserMedia({
+              audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+              },
+              video: false,
+            });
+            track = micStream.getAudioTracks()[0];
+          }
+          if (!track) return;
+
+          let audioSender = pc.getSenders().find((s) => s.track?.kind === "audio");
+          if (!audioSender?.track) {
+            pc.addTrack(track, micStream);
+            await renegotiateWithSender();
+          } else if (audioSender.track !== track) {
+            await audioSender.replaceTrack(track);
+          }
+          if (audioSender.track) audioSender.track.enabled = true;
+        } catch (e) {
+          log(`마이크 복구 실패: ${e?.message || e}`);
+        }
+      }
+
+      async function setViewerMicEnabled(on) {
+        if (!pc || !senderSocketId) {
+          log("마이크: 먼저 [접속] 후 송출자와 연결되면 사용할 수 있습니다.");
+          return;
+        }
+        if (on === micOn) return;
+
+        if (!on) {
+          const audioSender = pc.getSenders().find((s) => s.track && s.track.kind === "audio");
+          if (audioSender) audioSender.track.enabled = false;
+          if (micStream) micStream.getTracks().forEach((t) => t.stop());
+          micStream = null;
+          micOn = false;
+          btnMic.textContent = "마이크 켜기";
+          btnMic.classList.remove("mic-on");
+          log("마이크 OFF (송신 중지)");
+          return;
+        }
+
+        try {
+          if (!micStream) {
+            micStream = await navigator.mediaDevices.getUserMedia({
+              audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+              },
+              video: false,
+            });
+          }
+          const track = micStream.getAudioTracks()[0];
+          if (!track) throw new Error("no audio track");
+
+          let audioSender = pc.getSenders().find((s) => s.track && s.track.kind === "audio");
+          if (audioSender) {
+            await audioSender.replaceTrack(track);
+            audioSender.track.enabled = true;
+          } else {
+            pc.addTrack(track, micStream);
+            await renegotiateWithSender();
+          }
+          micOn = true;
+          btnMic.textContent = "마이크 끄기";
+          btnMic.classList.add("mic-on");
+          log("마이크 ON → 송출자로 전송");
+        } catch (e) {
+          log(`마이크 실패: ${e?.message || e}`);
+          stopViewerMic();
+        }
+      }
+
+      async function toggleFullscreen() {
+        try {
+          if (document.fullscreenElement) {
+            await document.exitFullscreen();
+            return;
+          }
+          const el = remoteVideo;
+          if (el.requestFullscreen) await el.requestFullscreen();
+          else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+        } catch (e) {
+          log(`fullscreen failed: ${e?.message || e}`);
+        }
+      }
+
+      function ensurePc() {
+        if (pc) return pc;
+        pc = new RTCPeerConnection(rtcConfig);
+        startCodecPoll(pc);
+        startInboundQualityPoll(pc);
+        startHealthPoll(pc);
+
+        pc.ontrack = (e) => {
+          const [stream] = e.streams;
+          if (!stream) return;
+          remoteVideo.srcObject = stream;
+          remoteVideo.play().catch(() => log("화면을 탭하면 재생됩니다"));
+        };
+        pc.onicecandidate = (e) => {
+          if (!e.candidate) return;
+          if (!senderSocketId) return;
+          socket.emit("signal", {
+            roomId: joinedRoomId,
+            to: senderSocketId,
+            type: "ice",
+            candidate: e.candidate,
+          });
+        };
+        pc.onconnectionstatechange = () => log(`state=${pc.connectionState}`);
+        return pc;
+      }
+
+      async function join() {
+        if (!ROOM_ID) {
+          log("ERROR: 잘못된 시청 URL입니다.");
+          return;
+        }
+        if (!isAuthorized) {
+          showGate(true);
+          return;
+        }
+        if (joinedRoomId && socket.connected) {
+          log("이미 접속 중입니다.");
+          return;
+        }
+        btnJoin.disabled = true;
+        try {
+          if (!socket.connected) socket.connect();
+          joinedRoomId = ROOM_ID;
+          socket.emit("join", { roomId: joinedRoomId, role: "viewer" });
+          btnLeave.disabled = false;
+          btnMic.disabled = false;
+          log(`접속됨 — room=${joinedRoomId.slice(0, 8)}…`);
+        } catch (e) {
+          joinedRoomId = null;
+          btnJoin.disabled = false;
+          log(`ERROR: ${e.message || e}`);
+        }
+      }
+
+      function leave() {
+        btnLeave.disabled = true;
+        btnJoin.disabled = isAuthorized ? false : true;
+        resetPc();
+        joinedRoomId = null;
+        try {
+          socket.disconnect();
+        } catch {}
+        log("left");
+      }
+
+      socket.on("joined", ({ senderPresent }) => {
+        log(senderPresent ? "sender present" : "waiting for sender");
+      });
+
+      socket.on("room_state", ({ roomId, senderPresent, viewerCount }) => {
+        if (!joinedRoomId || roomId !== joinedRoomId) return;
+        viewerCountEl.textContent = typeof viewerCount === "number" ? String(viewerCount) : "-";
+        log(`room: sender=${senderPresent ? "on" : "off"}  viewers=${viewerCount}`);
+        if (micOn) repairViewerMicIfNeeded().catch((e) => log(`ERROR: ${e.message || e}`));
+      });
+
+      socket.on("signal", async (msg) => {
+        const { from, type } = msg || {};
+        if (!from) return;
+        if (!joinedRoomId) return;
+        senderSocketId = from;
+        const pc = ensurePc();
+        if (type === "sdp") {
+          const desc = msg.description;
+          if (!desc) return;
+          await pc.setRemoteDescription(desc);
+          if (desc.type === "offer") {
+            if (preferH264VideoReceive(pc)) log("codec: H.264 preferred (recv)");
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            socket.emit("signal", {
+              roomId: joinedRoomId,
+              to: senderSocketId,
+              type: "sdp",
+              description: pc.localDescription,
+            });
+            log("answered offer");
+            btnMic.disabled = false;
+          } else if (desc.type === "answer") {
+            log("SDP renegotiation OK (마이크)");
+          }
+        } else if (type === "ice") {
+          try {
+            await pc.addIceCandidate(msg.candidate);
+          } catch (e) {
+            log(`ICE add failed: ${e.message || e}`);
+          }
+        }
+      });
+
+      socket.on("sender_left", () => {
+        log("sender left (reset)");
+        resetPc();
+      });
+
+      socket.on("room_closed", () => {
+        log("방이 종료되었습니다.");
+        leave();
+        isAuthorized = false;
+        gateSub.textContent = "이 방은 관리자에 의해 종료되었습니다.";
+        $("passForm").classList.add("hidden");
+        showGate(true);
+      });
+
+      socket.on("kicked", ({ reason }) => {
+        log(`kicked: ${reason || "unknown"}`);
+        leave();
+        isAuthorized = false;
+        ensureAuthorized();
+      });
+
+      socket.on("connect", () => log("Socket.IO connected"));
+      socket.on("connect_error", (err) => {
+        log(`Socket 연결 실패: ${err && err.message ? err.message : err}`);
+        joinedRoomId = null;
+        btnJoin.disabled = isAuthorized ? false : true;
+        btnLeave.disabled = true;
+      });
+
+      btnJoin.addEventListener("click", join);
+      btnLeave.addEventListener("click", leave);
+      btnMic.addEventListener("click", () => {
+        setViewerMicEnabled(!micOn).catch((e) => log(`ERROR: ${e.message || e}`));
+      });
+      btnFullscreen.addEventListener("click", toggleFullscreen);
+      remoteVideo.addEventListener("dblclick", toggleFullscreen);
+      remoteVideo.addEventListener(
+        "click",
+        () => {
+          if (remoteVideo.srcObject) remoteVideo.play().catch(() => {});
+        },
+        { passive: true }
+      );
+
+      (async () => {
+        log(`ready  •  roomId=${ROOM_ID}`);
+        await ensureAuthorized();
+      })();
+    </script>
+  </body>
+</html>

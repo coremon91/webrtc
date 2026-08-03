@@ -1,0 +1,616 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Publish • Low-latency P2P</title>
+    <link rel="stylesheet" href="/style.css" />
+    <style>
+      .room-pill {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="row" style="justify-content: space-between; margin-bottom: 12px">
+        <div>
+          <div style="font-size: 18px; font-weight: 650">송출자 (Sender)</div>
+          <div class="row" style="gap: 8px; margin-top: 6px">
+            <div class="pill">WebRTC • P2P</div>
+            <div class="pill room-pill">room: <span id="roomIdPill">-</span></div>
+            <div class="pill">Viewers: <span id="viewerCount">-</span></div>
+            <div class="pill">Avail: <span id="metricAvail">-</span></div>
+            <div class="pill">NACK/PLI: <span id="metricNackPli">-</span></div>
+            <div class="pill">시청 마이크: <span id="viewerMicStatus">-</span></div>
+          </div>
+        </div>
+        <a href="/admin" style="color: #b9c4ff; text-decoration: none">관리자로 이동</a>
+      </div>
+
+      <div class="card">
+        <div class="row">
+          <label>
+            카메라
+            <select id="videoSource"></select>
+          </label>
+          <label>
+            마이크 (L)
+            <select id="audioSourceL"></select>
+          </label>
+          <label>
+            마이크 (R)
+            <select id="audioSourceR"></select>
+          </label>
+          <button id="btnStart">송출 시작</button>
+          <button id="btnStop" disabled>중지</button>
+        </div>
+        <div class="row" style="margin-top: 8px; gap: 8px; flex-wrap: wrap">
+          <label>
+            해상도
+            <select id="videoResolution">
+              <option value="640x360" selected>640×360</option>
+              <option value="854x480">854×480</option>
+              <option value="1280x720">1280×720</option>
+              <option value="1920x1080">1920×1080</option>
+            </select>
+          </label>
+          <label>
+            FPS
+            <select id="videoFps">
+              <option value="15">15</option>
+              <option value="20">20</option>
+              <option value="30" selected>30</option>
+              <option value="60">60</option>
+            </select>
+          </label>
+          <label>
+            비트레이트 (kbps)
+            <input id="videoBitrateKbps" type="number" min="200" max="8000" step="50" value="900" />
+          </label>
+          <button type="button" id="btnApplyVideo">영상 설정 적용</button>
+        </div>
+      </div>
+
+      <div class="grid">
+        <div class="card">
+          <video id="preview" playsinline autoplay muted></video>
+          <audio id="viewerMicIn" autoplay playsinline style="display: none"></audio>
+        </div>
+        <div class="card">
+          <div class="meta" id="status">Idle</div>
+        </div>
+      </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const statusEl = $("status");
+
+      const videoSelect = $("videoSource");
+      const audioSelectL = $("audioSourceL");
+      const audioSelectR = $("audioSourceR");
+      const btnStart = $("btnStart");
+      const btnStop = $("btnStop");
+      const preview = $("preview");
+      const viewerCountEl = $("viewerCount");
+      const metricAvailEl = $("metricAvail");
+      const metricNackPliEl = $("metricNackPli");
+      const viewerMicStatusEl = $("viewerMicStatus");
+      const viewerMicIn = $("viewerMicIn");
+      const roomIdPill = $("roomIdPill");
+
+      // roomId comes from the path: /publish/:roomId
+      const ROOM_ID = (() => {
+        const parts = location.pathname.split("/").filter(Boolean);
+        return parts.length >= 2 && parts[0] === "publish" ? parts[1] : "";
+      })();
+      roomIdPill.textContent = ROOM_ID ? `${ROOM_ID.slice(0, 8)}…` : "(none)";
+
+      const socket = io();
+
+      const pcs = new Map();
+      let localStream = null;
+      let joinedRoomId = null;
+      let audioCtx = null;
+      let micStreamL = null;
+      let micStreamR = null;
+
+      const iceServers = [
+        { urls: "stun:stun.l.google.com:19302" },
+        {
+          urls: "turn:43.201.22.7:3478?transport=udp",
+          username: "webrtcuser",
+          credential: "webrtcpassword",
+        },
+        {
+          urls: "turn:43.201.22.7:3478?transport=tcp",
+          username: "webrtcuser",
+          credential: "webrtcpassword",
+        },
+      ];
+      const rtcConfig = {
+        iceServers,
+        iceTransportPolicy: "all",
+      };
+
+      function readTargetFromUi() {
+        const res = ($("videoResolution").value || "640x360").split("x");
+        const w = Number(res[0]) || 640;
+        const h = Number(res[1]) || 360;
+        const fps = Number($("videoFps").value) || 30;
+        const kbps = Number($("videoBitrateKbps").value) || 900;
+        return {
+          width: w,
+          height: h,
+          maxFramerate: fps,
+          maxBitrateBps: Math.max(200, Math.min(8000, kbps)) * 1000,
+        };
+      }
+
+      function log(line) {
+        statusEl.textContent = `${new Date().toLocaleTimeString()}  ${line}\n` + statusEl.textContent;
+      }
+
+      function orderH264First(codecs) {
+        if (!codecs || !codecs.length) return codecs;
+        const h264 = codecs.filter((c) => /h264/i.test(c.mimeType || ""));
+        const rest = codecs.filter((c) => !/h264/i.test(c.mimeType || ""));
+        return h264.length ? h264.concat(rest) : codecs;
+      }
+
+      function preferH264VideoSend(pc) {
+        if (!window.RTCRtpSender?.getCapabilities) return false;
+        const caps = RTCRtpSender.getCapabilities("video");
+        if (!caps?.codecs?.length) return false;
+        const prefs = orderH264First(caps.codecs);
+        const tx = pc.getTransceivers().find((t) => t.sender?.track?.kind === "video");
+        if (!tx?.setCodecPreferences) return false;
+        tx.setCodecPreferences(prefs);
+        return true;
+      }
+
+      async function getVideoCodecLineFromStats(pc) {
+        try {
+          const stats = await pc.getStats();
+          let outboundVideo = null;
+          let codec = null;
+          stats.forEach((s) => {
+            if (s.type === "outbound-rtp" && s.kind === "video" && !s.isRemote) {
+              outboundVideo = outboundVideo ? (s.bytesSent > outboundVideo.bytesSent ? s : outboundVideo) : s;
+            }
+          });
+          if (outboundVideo && outboundVideo.codecId) {
+            codec = stats.get(outboundVideo.codecId);
+          }
+          const mime = codec?.mimeType || codec?.codec || null;
+          const enc = outboundVideo?.encoderImplementation || null;
+          const scalability = outboundVideo?.scalabilityMode || null;
+          const parts = [];
+          if (mime) parts.push(`codec=${mime}`);
+          if (enc) parts.push(`encoder=${enc}`);
+          if (scalability) parts.push(`scalability=${scalability}`);
+          return parts.length ? parts.join("  ") : null;
+        } catch {
+          return null;
+        }
+      }
+
+      function startCodecPoll(pc, label) {
+        let last = null;
+        const id = setInterval(async () => {
+          if (pc.connectionState === "closed") return;
+          const line = await getVideoCodecLineFromStats(pc);
+          if (line && line !== last) {
+            last = line;
+            log(`${label} ${line}`);
+          }
+        }, 2000);
+        pc.addEventListener("connectionstatechange", () => {
+          if (pc.connectionState === "closed" || pc.connectionState === "failed") clearInterval(id);
+        });
+        return id;
+      }
+
+      async function listDevices() {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videos = devices.filter((d) => d.kind === "videoinput");
+        const audios = devices.filter((d) => d.kind === "audioinput");
+
+        videoSelect.innerHTML = videos
+          .map((d, i) => `<option value="${d.deviceId}">${d.label || "Camera " + (i + 1)}</option>`)
+          .join("");
+        const audioOptions =
+          `<option value="">(none)</option>` +
+          audios.map((d, i) => `<option value="${d.deviceId}">${d.label || "Mic " + (i + 1)}</option>`).join("");
+        audioSelectL.innerHTML = audioOptions;
+        audioSelectR.innerHTML = audioOptions;
+      }
+
+      async function buildStereoMicTrack() {
+        const idL = (audioSelectL.value || "").trim();
+        const idR = (audioSelectR.value || "").trim();
+        if (!idL && !idR) return null;
+
+        const commonAudioConstraints = {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          channelCount: 1,
+        };
+
+        const getMic = async (deviceId) => {
+          if (!deviceId) return null;
+          return await navigator.mediaDevices.getUserMedia({
+            video: false,
+            audio: { deviceId: { exact: deviceId }, ...commonAudioConstraints },
+          });
+        };
+
+        if (idL && idR && idL === idR) {
+          micStreamL = await getMic(idL);
+          micStreamR = micStreamL;
+        } else {
+          micStreamL = await getMic(idL);
+          micStreamR = await getMic(idR);
+        }
+
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const dest = audioCtx.createMediaStreamDestination();
+
+        const connectPanned = (stream, pan) => {
+          if (!stream) return;
+          const track = stream.getAudioTracks()[0];
+          if (!track) return;
+          const src = audioCtx.createMediaStreamSource(new MediaStream([track]));
+          const panner = audioCtx.createStereoPanner();
+          panner.pan.value = pan;
+          src.connect(panner).connect(dest);
+        };
+
+        connectPanned(micStreamL, -1);
+        connectPanned(micStreamR, +1);
+
+        const mixedTrack = dest.stream.getAudioTracks()[0] || null;
+        if (!mixedTrack) return null;
+        mixedTrack.contentHint = "music";
+        return mixedTrack;
+      }
+
+      async function getMedia() {
+        const t = readTargetFromUi();
+        const videoDeviceId = videoSelect.value || undefined;
+        const videoBase = videoDeviceId ? { deviceId: { exact: videoDeviceId } } : {};
+        let stream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              ...videoBase,
+              width: { exact: t.width },
+              height: { exact: t.height },
+              frameRate: { exact: t.maxFramerate },
+            },
+            audio: false,
+          });
+        } catch (e) {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              ...videoBase,
+              width: { ideal: t.width },
+              height: { ideal: t.height },
+              frameRate: { ideal: t.maxFramerate, max: t.maxFramerate },
+            },
+            audio: false,
+          });
+          log(`getUserMedia fallback (not exact ${t.width}x${t.height}@${t.maxFramerate}): ${e?.name || e}`);
+        }
+
+        const mixedAudioTrack = await buildStereoMicTrack();
+        if (mixedAudioTrack) stream.addTrack(mixedAudioTrack);
+        else log("audio: none");
+
+        preview.srcObject = stream;
+
+        const vt = stream.getVideoTracks()[0];
+        if (vt?.getSettings) {
+          const s = vt.getSettings();
+          log(`capture: ${s.width || "?"}x${s.height || "?"} @ ${s.frameRate || "?"}fps`);
+          if (s.width && s.height && (s.width < t.width || s.height < t.height)) {
+            log(
+              `WARN: capture resolution is below ${t.width}x${t.height} (cannot upscale in WebRTC). Check camera/OBS output size.`
+            );
+          }
+        }
+
+        return stream;
+      }
+
+      async function configureVideoSenderForLowLatency(pc) {
+        const t = readTargetFromUi();
+        const sender = pc.getSenders().find((s) => s.track && s.track.kind === "video");
+        if (!sender) return;
+        try {
+          await sender.track.applyConstraints({
+            width: { ideal: t.width },
+            height: { ideal: t.height },
+            frameRate: { ideal: t.maxFramerate, max: t.maxFramerate },
+          });
+        } catch {}
+
+        const params = sender.getParameters();
+        if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
+
+        const trackSettings = sender.track.getSettings?.() || {};
+        const w = trackSettings.width || 0;
+        const h = trackSettings.height || 0;
+        const scale = w && h ? Math.max(1, w / t.width, h / t.height) : 1;
+
+        params.encodings[0] = {
+          ...params.encodings[0],
+          maxBitrate: t.maxBitrateBps,
+          maxFramerate: t.maxFramerate,
+          scaleResolutionDownBy: scale,
+        };
+        params.degradationPreference = "maintain-framerate";
+
+        await sender.setParameters(params);
+
+        const actual = sender.track.getSettings?.() || {};
+        log(
+          `video target: ${Math.round(t.maxBitrateBps / 1000)}kbps  ${t.width}x${t.height}  ${
+            t.maxFramerate
+          }fps  (actual ${actual.width || "?"}x${actual.height || "?"} @ ${actual.frameRate || "?"}fps, scaleDownBy=${scale.toFixed(
+            2
+          )})`
+        );
+      }
+
+      async function applyVideoSettings() {
+        const t = readTargetFromUi();
+        if (localStream) {
+          const vt = localStream.getVideoTracks()[0];
+          if (vt) {
+            try {
+              await vt.applyConstraints({
+                width: { ideal: t.width },
+                height: { ideal: t.height },
+                frameRate: { ideal: t.maxFramerate, max: t.maxFramerate },
+              });
+            } catch (e) {
+              log(`constraints: ${e?.message || e}`);
+            }
+          }
+        }
+        for (const pc of pcs.values()) {
+          await configureVideoSenderForLowLatency(pc);
+        }
+        log(`영상 설정 적용: ${t.width}x${t.height} @ ${t.maxFramerate}fps, ${Math.round(t.maxBitrateBps / 1000)}kbps`);
+      }
+
+      function startSenderHealthPoll(pc) {
+        let lastNack = null;
+        let lastPli = null;
+        const id = setInterval(async () => {
+          if (pc.connectionState === "closed") return;
+          try {
+            const stats = await pc.getStats();
+            let avail = null;
+            stats.forEach((s) => {
+              if (s.type === "candidate-pair" && s.state === "succeeded" && s.nominated) {
+                if (typeof s.availableOutgoingBitrate === "number") avail = s.availableOutgoingBitrate;
+              }
+            });
+            if (avail != null) metricAvailEl.textContent = `${(avail / 1_000_000).toFixed(1)}Mbps`;
+
+            let outV = null;
+            stats.forEach((s) => {
+              if (s.type === "outbound-rtp" && s.kind === "video" && !s.isRemote) outV = s;
+            });
+            const nack = typeof outV?.nackCount === "number" ? outV.nackCount : null;
+            const pli = typeof outV?.pliCount === "number" ? outV.pliCount : null;
+            const dN = nack == null || lastNack == null ? null : nack - lastNack;
+            const dP = pli == null || lastPli == null ? null : pli - lastPli;
+            if (nack != null) lastNack = nack;
+            if (pli != null) lastPli = pli;
+            const parts = [];
+            if (dN != null) parts.push(`N+${dN}`);
+            if (dP != null) parts.push(`P+${dP}`);
+            if (parts.length) metricNackPliEl.textContent = parts.join(" ");
+          } catch {}
+        }, 2000);
+        pc.addEventListener("connectionstatechange", () => {
+          if (pc.connectionState === "closed" || pc.connectionState === "failed") clearInterval(id);
+        });
+        return id;
+      }
+
+      /** 다른 시청자가 나가도 남은 시청자 마이크 재생을 유지 */
+      function refreshViewerMicPlayback() {
+        for (const [, pc] of pcs) {
+          if (pc.connectionState === "closed" || pc.connectionState === "failed") continue;
+          for (const recv of pc.getReceivers()) {
+            const track = recv.track;
+            if (track?.kind === "audio" && track.readyState === "live") {
+              viewerMicIn.srcObject = new MediaStream([track]);
+              viewerMicIn.play().catch(() => {});
+              viewerMicStatusEl.textContent = "수신 중";
+              return;
+            }
+          }
+        }
+        viewerMicIn.srcObject = null;
+        viewerMicStatusEl.textContent = "-";
+      }
+
+      function ensurePc(viewerSocketId) {
+        if (pcs.has(viewerSocketId)) return pcs.get(viewerSocketId);
+        const pc = new RTCPeerConnection(rtcConfig);
+        pcs.set(viewerSocketId, pc);
+
+        pc.onicecandidate = (e) => {
+          if (!e.candidate) return;
+          socket.emit("signal", {
+            roomId: joinedRoomId,
+            to: viewerSocketId,
+            type: "ice",
+            candidate: e.candidate,
+          });
+        };
+
+        pc.onconnectionstatechange = () => {
+          log(`viewer ${viewerSocketId} state=${pc.connectionState}`);
+        };
+
+        pc.ontrack = (e) => {
+          if (e.track.kind !== "audio") return;
+          e.track.addEventListener("ended", () => refreshViewerMicPlayback());
+          const stream = e.streams[0] || new MediaStream([e.track]);
+          viewerMicIn.srcObject = stream;
+          viewerMicIn.play().catch(() => {});
+          viewerMicStatusEl.textContent = "수신 중";
+          log(`viewer ${viewerSocketId.slice(0, 8)} 마이크 수신`);
+        };
+
+        startCodecPoll(pc, `viewer ${viewerSocketId}`);
+        startSenderHealthPoll(pc);
+
+        for (const track of localStream.getTracks()) {
+          pc.addTrack(track, localStream);
+        }
+        if (preferH264VideoSend(pc)) log(`viewer ${viewerSocketId} codec: H.264 preferred (send)`);
+        configureVideoSenderForLowLatency(pc);
+        return pc;
+      }
+
+      async function start() {
+        if (!ROOM_ID) {
+          log("ERROR: 잘못된 송출 URL입니다.");
+          return;
+        }
+        btnStart.disabled = true;
+        try {
+          if (!localStream) {
+            localStream = await getMedia();
+          }
+          joinedRoomId = ROOM_ID;
+          socket.emit("join", { roomId: joinedRoomId, role: "sender" });
+          btnStop.disabled = false;
+          log(`joined room=${joinedRoomId} as sender`);
+        } catch (e) {
+          btnStart.disabled = false;
+          log(`ERROR: ${e.message || e}`);
+        }
+      }
+
+      async function stop() {
+        btnStop.disabled = true;
+        btnStart.disabled = false;
+        for (const pc of pcs.values()) pc.close();
+        pcs.clear();
+        if (localStream) {
+          localStream.getTracks().forEach((t) => t.stop());
+          localStream = null;
+        }
+        if (micStreamL && micStreamL !== micStreamR) micStreamL.getTracks().forEach((t) => t.stop());
+        if (micStreamR) micStreamR.getTracks().forEach((t) => t.stop());
+        micStreamL = null;
+        micStreamR = null;
+        if (audioCtx) {
+          try {
+            await audioCtx.close();
+          } catch {}
+        }
+        audioCtx = null;
+        preview.srcObject = null;
+        joinedRoomId = null;
+        log("stopped");
+      }
+
+      socket.on("viewer_joined", async ({ viewerSocketId }) => {
+        if (!localStream || !joinedRoomId) return;
+        log(`viewer joined: ${viewerSocketId}`);
+        const pc = ensurePc(viewerSocketId);
+        preferH264VideoSend(pc);
+        const offer = await pc.createOffer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: false,
+        });
+        await pc.setLocalDescription(offer);
+        socket.emit("signal", {
+          roomId: joinedRoomId,
+          to: viewerSocketId,
+          type: "sdp",
+          description: pc.localDescription,
+        });
+      });
+
+      socket.on("room_state", ({ roomId, senderPresent, viewerCount }) => {
+        if (!joinedRoomId || roomId !== joinedRoomId) return;
+        viewerCountEl.textContent = typeof viewerCount === "number" ? String(viewerCount) : "-";
+        log(`room: sender=${senderPresent ? "on" : "off"}  viewers=${viewerCount}`);
+      });
+
+      socket.on("signal", async (msg) => {
+        const { from, type } = msg || {};
+        if (!from) return;
+        if (!localStream || !joinedRoomId) return;
+        const pc = ensurePc(from);
+        if (type === "sdp") {
+          const desc = msg.description;
+          if (!desc) return;
+          await pc.setRemoteDescription(desc);
+          if (desc.type === "answer") {
+            log(`got answer from ${from.slice(0, 8)}`);
+          } else if (desc.type === "offer") {
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            socket.emit("signal", {
+              roomId: joinedRoomId,
+              to: from,
+              type: "sdp",
+              description: pc.localDescription,
+            });
+            log(`viewer ${from.slice(0, 8)} renegotiation (마이크)`);
+          }
+        } else if (type === "ice") {
+          try {
+            await pc.addIceCandidate(msg.candidate);
+          } catch (e) {
+            log(`ICE add failed: ${e.message || e}`);
+          }
+        }
+      });
+
+      socket.on("viewer_left", ({ viewerSocketId }) => {
+        const pc = pcs.get(viewerSocketId);
+        if (pc) pc.close();
+        pcs.delete(viewerSocketId);
+        refreshViewerMicPlayback();
+        log(`viewer left: ${viewerSocketId}`);
+      });
+
+      socket.on("kicked", ({ reason }) => {
+        log(`kicked: ${reason || "unknown"}`);
+        stop();
+      });
+
+      btnStart.addEventListener("click", start);
+      btnStop.addEventListener("click", stop);
+      $("btnApplyVideo").addEventListener("click", () => {
+        applyVideoSettings().catch((e) => log(`ERROR: ${e.message || e}`));
+      });
+
+      (async () => {
+        try {
+          const temp = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+          temp.getTracks().forEach((t) => t.stop());
+        } catch {}
+        await listDevices();
+        navigator.mediaDevices.addEventListener("devicechange", listDevices);
+        log(`ready  •  roomId=${ROOM_ID}`);
+      })();
+    </script>
+  </body>
+</html>

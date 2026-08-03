@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Login • Low-latency P2P</title>
+    <link rel="stylesheet" href="/style.css" />
+    <style>
+      .login-wrap {
+        max-width: 420px;
+        margin: 10vh auto;
+        padding: 24px;
+      }
+      .login-card {
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 16px;
+        padding: 24px;
+        backdrop-filter: blur(10px);
+      }
+      .login-card h1 {
+        margin: 0 0 4px;
+        font-size: 20px;
+      }
+      .login-card .sub {
+        opacity: 0.7;
+        font-size: 13px;
+        margin-bottom: 18px;
+      }
+      .login-form label {
+        display: block;
+        margin-bottom: 12px;
+      }
+      .login-form label span {
+        display: block;
+        margin-bottom: 6px;
+        font-size: 13px;
+        opacity: 0.85;
+      }
+      .login-form input {
+        width: 100%;
+      }
+      .login-form .actions {
+        display: flex;
+        justify-content: flex-end;
+        margin-top: 8px;
+      }
+      .error {
+        color: #ff9a9a;
+        font-size: 13px;
+        min-height: 18px;
+        margin-top: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="login-wrap">
+      <div class="login-card">
+        <h1>관리자 로그인</h1>
+        <div class="sub">방을 생성하려면 관리자 계정으로 로그인하세요.</div>
+        <form id="loginForm" class="login-form" autocomplete="off">
+          <label>
+            <span>아이디</span>
+            <input id="username" name="username" value="admin" required />
+          </label>
+          <label>
+            <span>비밀번호</span>
+            <input id="password" name="password" type="password" required />
+          </label>
+          <div class="error" id="err"></div>
+          <div class="actions">
+            <button type="submit" id="btnLogin">로그인</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <script>
+      const form = document.getElementById("loginForm");
+      const errEl = document.getElementById("err");
+      const btn = document.getElementById("btnLogin");
+
+      function getNext() {
+        const params = new URLSearchParams(location.search);
+        const n = params.get("next");
+        if (!n) return "/admin";
+        // Only allow same-origin relative paths
+        if (!n.startsWith("/") || n.startsWith("//")) return "/admin";
+        return n;
+      }
+
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        errEl.textContent = "";
+        btn.disabled = true;
+        try {
+          const res = await fetch("/api/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "same-origin",
+            body: JSON.stringify({
+              username: document.getElementById("username").value,
+              password: document.getElementById("password").value,
+            }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || !data.ok) {
+            errEl.textContent = data.error || "로그인 실패";
+            return;
+          }
+          location.href = getNext();
+        } catch (e) {
+          errEl.textContent = "네트워크 오류";
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>

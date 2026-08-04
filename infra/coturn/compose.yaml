@@ -3,15 +3,18 @@ services:
     image: coturn/coturn:4.16.0-r0
     container_name: webrtc-coturn
     restart: unless-stopped
-    network_mode: host
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "5349:5349/tcp"
+      - "49160-49200:49160-49200/udp"
     read_only: true
     tmpfs:
       - /tmp
       - /var/lib/coturn
     volumes:
       - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
-      - ${TURN_TLS_CERT_PATH:?Set TURN_TLS_CERT_PATH}:/etc/coturn/certs/fullchain.pem:ro
-      - ${TURN_TLS_KEY_PATH:?Set TURN_TLS_KEY_PATH}:/etc/coturn/certs/privkey.pem:ro
+      - ./certs:/etc/coturn/certs:ro
     command:
       - --config=/etc/coturn/turnserver.conf
       - --external-ip=${TURN_EXTERNAL_IP:?Set TURN_EXTERNAL_IP}

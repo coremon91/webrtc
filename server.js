@@ -5,6 +5,14 @@ const crypto = require("crypto");
 const express = require("express");
 const { Server } = require("socket.io");
 
+if (typeof process.loadEnvFile === "function") {
+  try {
+    process.loadEnvFile(path.join(__dirname, ".env"));
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+}
+
 const ADMIN_USER = process.env.ADMIN_USER || "admin";
 const ADMIN_PASS = process.env.ADMIN_PASS || "kbcwebrtc";
 

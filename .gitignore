@@ -1,0 +1,16 @@
+node_modules/
+.env
+.env.*
+!.env.example
+HANDOFF.md
+data/
+backups/
+__pycache__/
+*.pyc
+*.pem
+*.key
+*.p12
+*.pfx
+npm-debug.log*
+*.log
+.DS_Store

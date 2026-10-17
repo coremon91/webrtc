@@ -1,0 +1,11 @@
+node_modules
+.env
+.git
+.gitignore
+data
+test
+tools
+*.log
+README.md
+HANDOFF.md
+docs

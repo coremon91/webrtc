@@ -1,0 +1,46 @@
+# Use ONLY after setting a real domain/public IPv4 and forwarding ports.
+# docker compose -f docker-compose.yml -f docker-compose.public.yml up -d --build
+services:
+  turnserver:
+    command:
+      - "--log-file=stdout"
+      - "--use-auth-secret"
+      - "--static-auth-secret=${TURN_SECRET:?set TURN_SECRET in .env}"
+      - "--realm=${TURN_REALM:-webrtc.local}"
+      - "--listening-ip=0.0.0.0"
+      - "--listening-port=3478"
+      - "--min-port=49152"
+      - "--max-port=49401"
+      - "--relay-threads=2"
+      - "--external-ip=${TURN_EXTERNAL_IP:?set public IPv4 as TURN_EXTERNAL_IP}"
+      - "--fingerprint"
+      - "--no-multicast-peers"
+      - "--no-tls"
+      - "--no-cli"
+    ports: !override
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "49152-49401:49152-49401/udp"
+  signaling:
+    environment:
+      ACCESS_KEY: "${ACCESS_KEY:?set a long random ACCESS_KEY}"
+      TURN_HOST: "${TURN_HOST:?set public TURN_HOST}"
+      CORS_ORIGIN: "https://${PUBLIC_DOMAIN:?set PUBLIC_DOMAIN}"
+  caddy:
+    image: caddy:2-alpine
+    container_name: webrtc-https
+    restart: unless-stopped
+    depends_on:
+      signaling:
+        condition: service_healthy
+    ports: ["80:80", "443:443"]
+    environment:
+      PUBLIC_DOMAIN: "${PUBLIC_DOMAIN:?set PUBLIC_DOMAIN}"
+      ACME_EMAIL: "${ACME_EMAIL:?set ACME_EMAIL}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+volumes:
+  caddy_data:
+  caddy_config:

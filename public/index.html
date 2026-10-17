@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>FRAME — WebRTC Live Studio</title>
+  <script>if(new URLSearchParams(location.search).get('obs')==='1')document.documentElement.classList.add('obs-mode');</script>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/socket.io/socket.io.js" defer></script>
+  <script src="/main.js" defer></script>
+</head>
+<body data-role="sender">
+  <header class="topbar chrome">
+    <a href="/" class="brand" aria-label="FRAME 스튜디오 홈"><span class="brand-mark">F<span></span></span>FRAME<span class="brand-divider"></span><span class="brand-sub">LIVE STUDIO</span></a>
+    <span class="top-note"><span class="dot"></span> Browser to broadcast</span>
+  </header>
+  <main class="workspace">
+    <section class="page-heading chrome">
+      <div><p class="eyebrow">YOUR SIGNAL, EVERYWHERE</p><h1>한 장면으로 연결되는 방송.</h1><p class="subtitle">송출은 간단하게, 시청은 링크 하나로. OBS까지 이어지는 라이브 스튜디오.</p></div>
+      <div class="role-stamp">WebRTC <span>실시간 영상 전송</span></div>
+    </section>
+    <section class="connection-bar chrome" aria-label="입장 설정">
+      <label>접속 역할<select id="roleSelect"><option value="sender">Sender · 송출</option><option value="viewer">Viewer · 시청</option></select></label>
+      <label>방 이름<input id="roomName" value="studio" maxlength="64" pattern="[a-zA-Z0-9_-]+" autocomplete="off" spellcheck="false"></label>
+      <label>표시 이름<input id="userName" placeholder="이름 입력 (선택)" maxlength="60" autocomplete="off"></label>
+      <label>접속 키<input id="accessKey" type="password" placeholder="설정한 경우 입력" autocomplete="off"></label>
+      <div class="connection-actions"><button id="btn-join" class="primary" type="button"><span class="button-dot"></span>송출 시작</button><button id="btn-leave" class="secondary" type="button" disabled>종료</button></div>
+    </section>
+    <div class="studio-grid">
+      <section class="preview-column">
+        <section class="video-panel" aria-label="영상 미리보기">
+          <div class="video-heading chrome"><span><span class="live-dot"></span>PROGRAM PREVIEW</span><span id="status" role="status">대기</span></div>
+          <div class="video-stage"><video id="mainVideo" autoplay playsinline muted></video><div id="waitingStatus" class="waiting"><span class="waiting-icon">◉</span><strong>방송을 준비하고 있습니다</strong><span>Sender로 송출하거나 Viewer로 입장하세요.</span></div><button id="btn-play" class="play-overlay" type="button" hidden>영상 재생 / 소리 켜기</button></div>
+          <div class="video-toolbar chrome"><span id="statusDetail" aria-live="polite">소스를 선택하고 송출을 시작하세요.</span><div><button id="btn-mute" class="ghost" type="button">소리 켜기</button><button id="btn-fullscreen" class="ghost" type="button">전체 화면 ↗</button></div></div>
+        </section>
+        <div class="telemetry chrome"><div><span class="metric-label">ACTUAL FORMAT</span><p id="actualSettings">아직 연결된 영상이 없습니다.</p></div><div><span class="metric-label">LIVE TRANSPORT</span><p id="transferStats">실측 전송률을 기다리고 있습니다.</p></div></div>
+        <section class="share-panel panel chrome sender-only"><div class="section-top"><div><p class="eyebrow">SHARE YOUR SIGNAL</p><h2>시청자와 OBS를 연결하세요</h2></div><span class="step-label">02 / CONNECT</span></div><p class="muted">같은 방의 영상이 재생됩니다. 접속 키를 사용하는 링크는 초대한 사람에게만 공유하세요.</p><div class="share-actions"><button id="btn-copy-viewer" class="secondary" type="button">Viewer 링크 복사 <span>↗</span></button><button id="btn-copy-obs" class="secondary" type="button">OBS 링크 복사 <span>↗</span></button></div><details><summary>OBS에서 영상 소스로 사용하기</summary><p>소스 추가 → <b>브라우저</b> → 복사한 OBS URL 붙여넣기. 너비 1920, 높이 1080으로 설정하세요. 영상만 화면 전체에 표시됩니다.</p><p>오디오는 <b>OBS를 통해 오디오 제어</b>를 켜세요. 소리가 차단되면 소스의 <b>상호작용</b>에서 재생 버튼을 누르세요. 방송 중 연결을 유지하려면 ‘보이지 않을 때 소스 종료’를 끄세요.</p></details></section>
+      </section>
+      <aside class="settings-column chrome sender-only">
+        <section class="panel settings-panel"><div class="section-top"><div><p class="eyebrow">MAKE IT YOURS</p><h2>송출 설정</h2></div><span class="step-label">01 / SOURCE</span></div><label>영상 소스<select id="sourceSelect"><option value="camera">카메라</option><option value="screen">화면 공유</option><option value="test">테스트 패턴 · 카메라 불필요</option></select></label><label class="check-label"><input id="audioEnabled" type="checkbox" checked>마이크 / 공유 오디오 포함</label><div class="divider"></div><div class="settings-row"><label>해상도<select id="resolution"><option value="640x360">360p</option><option value="1280x720" selected>720p · HD</option><option value="1920x1080">1080p · FHD</option></select></label><label>프레임레이트<select id="fpsSelect"><option value="15">15 FPS</option><option value="24">24 FPS</option><option value="30" selected>30 FPS</option><option value="60">60 FPS</option></select></label></div><label>영상 비트레이트 상한 <span class="unit">kbps / Viewer</span><input id="bitrateKbps" type="number" min="150" max="20000" step="50" value="2500"></label><button id="btn-apply" class="primary full-width" type="button" disabled>화질 적용</button><p class="hint">송출 중에도 화질을 조절할 수 있습니다. 실제 해상도와 FPS는 장치·네트워크에 따라 달라집니다.</p><div class="source-note"><span>i</span><p>시청자가 늘면 업로드 사용량도 늘어납니다. 테스트 패턴으로 카메라 없이 연결을 확인할 수 있습니다.</p></div></section>
+        <section class="panel audience-panel"><div class="section-top"><h2>시청자</h2><span class="audience-icon">◎</span></div><div class="audience-metrics"><div><strong id="viewerCount">0</strong><span>방에 접속</span></div><div><strong id="peerCount">0</strong><span>영상 연결</span></div></div><ul id="viewerList" class="viewer-list"><li class="empty-list">아직 접속한 Viewer가 없습니다.</li></ul></section>
+      </aside>
+      <section class="panel logs-panel chrome sender-only"><div class="section-top"><div><p class="eyebrow">KEEP AN EYE ON IT</p><h2>이벤트 로그</h2></div><button id="btn-clear-log" class="text-button" type="button">로그 지우기</button></div><ol id="logs" class="logs" aria-label="연결 이벤트 로그"></ol></section>
+    </div>
+    <footer class="chrome"><span>FRAME / LIVE STUDIO</span><span>외부 송출은 HTTPS 주소에서 열어주세요. · 카메라와 마이크는 Sender에서만 사용합니다.</span></footer>
+  </main>
+</body>
+</html>

@@ -1,5 +1,7 @@
 node_modules
 .env
+.env.*
+TUNNEL-ACCESS.private.html
 .git
 .gitignore
 data

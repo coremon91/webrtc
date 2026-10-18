@@ -11,8 +11,8 @@ services:
       - "--realm=${TURN_REALM:-webrtc.local}"
       - "--listening-ip=0.0.0.0"
       - "--listening-port=3478"
-      - "--min-port=49152"
-      - "--max-port=49401"
+      - "--min-port=${TURN_MIN_PORT:-40000}"
+      - "--max-port=${TURN_MAX_PORT:-40249}"
       - "--relay-threads=2"
       - "--external-ip=${TURN_EXTERNAL_IP:-127.0.0.1}"
       - "--fingerprint"
@@ -24,7 +24,7 @@ services:
     ports:
       - "127.0.0.1:3478:3478/udp"
       - "127.0.0.1:3478:3478/tcp"
-      - "127.0.0.1:49152-49401:49152-49401/udp"
+      - "127.0.0.1:${TURN_MIN_PORT:-40000}-${TURN_MAX_PORT:-40249}:${TURN_MIN_PORT:-40000}-${TURN_MAX_PORT:-40249}/udp"
     logging: &logging
       driver: json-file
       options:

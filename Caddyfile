@@ -1,5 +1,6 @@
 {
-  email {$ACME_EMAIL}
+  {$ACME_EMAIL_DIRECTIVE}
+  acme_ca {$ACME_CA:https://acme-v02.api.letsencrypt.org/directory}
 }
 {$PUBLIC_DOMAIN} {
   encode zstd gzip

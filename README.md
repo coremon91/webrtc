@@ -45,9 +45,11 @@ docker compose up -d --build
 4. 해상도/FPS/비트레이트를 바꾼 후 ‘화질 적용’을 누릅니다. Viewer의 실제 수신 형식도 확인하세요.
 5. ‘종료’를 누르면 방에서 나가고 캡처 트랙과 연결을 정리합니다.
 
-로컬 Compose는 HTTP 3000, TURN 3478 TCP/UDP와 UDP 49152~49401을 **127.0.0.1에만** 공개합니다.
+로컬 Compose는 HTTP 3000, TURN 3478 TCP/UDP와 UDP 40000~40249를 **127.0.0.1에만** 공개합니다.
 로컬 loopback 중계를 위해 `--allow-loopback-peers`를 사용합니다. 공개 배포에서는 이 옵션을 제거한 별도 명령을 씁니다.
 Windows Docker의 대량 포트 게시 부담을 피하려고 relay UDP 포트를 250개로 제한했습니다.
+Windows 기본 동적 UDP 범위(49152 이상)와의 충돌을 피하는 기본값이며,
+`TURN_MIN_PORT` / `TURN_MAX_PORT`로 변경할 수 있습니다. 변경 시 방화벽 허용 범위도 함께 바꾸세요.
 
 ### Docker 없이 Node 서버 실행
 
@@ -65,37 +67,62 @@ npm start
 `.env`에서 TURN을 비워 STUN만 사용할 수도 있지만, 다른 네트워크 간 연결은 실패할 수 있습니다.
 개발용 `npm run dev`는 Node 파일 변경 시 서버를 재시작합니다. 정적 HTML/JS/CSS 변경은 브라우저를 새로고침하세요.
 
-## 외부 접속 — 도메인이 정해진 뒤
+## 외부 접속 — kbctest.kro.kr
 
-현재 도메인과 공인 IP는 미정입니다. **외부 접속을 완료한 상태는 아닙니다.**
-HTTPS를 담당하는 Caddy와 TURN 배포 파일은 준비되어 있습니다.
-공인 IP로 도달 가능한 서버, 실제 도메인과 DNS, 방화벽/공유기 설정이 필요합니다.
+2026-10-18 확인: `kbctest.kro.kr`의 DNS 등록은 완료했습니다. 현재 PC 내부의 HTTP 응답과
+TURN 인증 Allocate는 확인했지만, 외부 인증기관에서 TCP 80/443에 접근하면 시간 초과가 발생했습니다.
+**HTTPS 인증서는 발급되지 않았고 외부 접속도 완료되지 않았습니다.**
+사용자에게 공유기·네트워크 관리 권한이 없어 이 PC의 직접 공개 방식은 중단했습니다.
+인증서 발급 재시도도 중지하고 로컬 구성을 복구했습니다.
 
-`.env`에서 다음 항목을 실제 값으로 설정합니다. 아래 값은 예시이며 그대로 사용하면 동작하지 않습니다.
+고정 도메인을 유지하려면 외부에서 접근 가능한 서버에 Caddy·signaling·coturn을 배포하고,
+`kbctest.kro.kr`의 A 레코드를 그 서버의 공인 IPv4로 변경합니다. Sender는 현재 PC의 브라우저로
+HTTPS 주소에 접속하므로 현재 네트워크의 인바운드 포트포워딩은 필요하지 않습니다.
+외부 서버의 방화벽과 보안그룹은 아래 포트를 허용해야 합니다.
+실제 서버 접속 정보가 준비되기 전에는 구매·배포·DNS 변경을 진행하지 않습니다.
+
+임시 접속 시험 대안과 정식 배포 절차는 [외부 배포 안내](docs/DEPLOYMENT.md)를 참고하세요.
+
+현재 무료 시험용 HTTPS 터널을 별도 구성으로 실행했습니다. 접속 키를 포함한 링크는
+로컬의 `TUNNEL-ACCESS.private.html`에서 엽니다. 재실행은 `node tools/tunnel-trial.js start`,
+주소 확인은 `node tools/tunnel-trial.js status`, 종료는 `node tools/tunnel-trial.js stop`입니다.
+이 방식은 임시 `trycloudflare.com` 주소를 사용하며 `kbctest.kro.kr`의 정식 배포가 아닙니다.
+외부 TURN 없이 STUN 직접 연결만 시험하므로 다른 네트워크에서 영상이 실패할 수 있습니다.
+
+로컬 `.env`를 보존하고 별도 `.env.public`에서 다음 항목을 실제 서버 값으로 설정합니다.
+현재 PC에 준비한 `.env.public`은 비공개이며 현재 네트워크 진단용 값과 staging 인증기관을 사용합니다.
+외부 서버에 옮길 때 공인 IP를 바꾸고 연결 확인 후 production 인증기관으로 전환해야 합니다.
 
 ```dotenv
-PUBLIC_DOMAIN=webrtc.example.com
-ACME_EMAIL=실제_인증서_관리_이메일
-TURN_HOST=turn.example.com
+PUBLIC_DOMAIN=kbctest.kro.kr
+ACME_EMAIL=
+ACME_CA=https://acme-staging-v02.api.letsencrypt.org/directory
+TURN_HOST=kbctest.kro.kr
 TURN_EXTERNAL_IP=실제_공인_IPv4
 ACCESS_KEY=길고_무작위인_접속_키
 TURN_SECRET=길고_무작위인_TURN_공유_비밀
+TURN_MIN_PORT=40000
+TURN_MAX_PORT=40249
 ```
 
 - `PUBLIC_DOMAIN`은 `https://`나 경로를 제외한 호스트 이름입니다.
 - 두 DNS 이름의 A 레코드를 공인 IPv4로 연결합니다. 같은 호스트 이름을 두 용도로 써도 됩니다.
   TURN용 DNS는 UDP를 전달하지 않는 웹 프록시를 통하지 않아야 합니다.
-- 공유기·Windows 방화벽·클라우드 보안그룹에서 TCP 80/443, TCP/UDP 3478, UDP 49152~49401을 서버로 전달합니다.
+- 서버 방화벽·클라우드 보안그룹에서 TCP 80/443, TCP/UDP 3478, UDP 40000~40249를 허용합니다.
+  공유기 뒤의 서버를 사용한다면 같은 포트를 서버로 전달할 네트워크 관리 권한도 필요합니다.
+- `ACME_EMAIL`은 선택 항목입니다. 인증서 관련 연락을 받을 이메일이 있으면 입력하세요.
+- staging 인증서는 브라우저에서 신뢰하지 않습니다. 외부 연결 시험 후 `ACME_CA`를 비우면
+  기본 production 인증기관을 사용합니다. 변경 후 Caddy를 다시 생성하고 발급 성공을 확인하세요.
 - `TURN_EXTERNAL_IP=127.0.0.1`, `TURN_HOST=localhost`는 반드시 외부 주소로 바꿉니다.
 - 공유기가 통신사 NAT/CGNAT 뒤에 있으면 포트포워딩만으로 해결되지 않습니다. 도달 가능한 공인 IP 또는 VPS가 필요합니다.
 - 공개용 `ACCESS_KEY`는 필수입니다. 접속 키를 아는 사람은 방에 입장할 수 있으므로 신뢰하는 사용자에게만 전달합니다.
 
 ```powershell
-docker compose -f docker-compose.yml -f docker-compose.public.yml config --quiet
-docker compose -f docker-compose.yml -f docker-compose.public.yml up -d --build
+docker compose --env-file .env.public -f docker-compose.yml -f docker-compose.public.yml config --quiet
+docker compose --env-file .env.public -f docker-compose.yml -f docker-compose.public.yml up -d --build
 ```
 
-Caddy가 인증서를 발급·갱신하고 HTTPS/WebSocket을 Node 서버로 전달합니다.
+도메인과 외부 80/443 연결이 정상일 때 Caddy가 인증서를 발급·갱신하고 HTTPS/WebSocket을 Node 서버로 전달합니다.
 외부 사용자는 `https://실제도메인/?role=sender` 또는 복사된 Viewer 링크로 접속합니다.
 공개용 파일은 TURN 포트를 외부 인터페이스에 게시하고 loopback 허용 옵션을 제외합니다.
 
@@ -161,14 +188,17 @@ API를 접속 키로 보호했다면 검사 프로세스의 `ACCESS_KEY` 환경�
 - 화면 공유의 오디오는 브라우저와 공유 대상에 따라 제공되지 않을 수 있습니다.
 - 비트레이트/FPS 상한 적용을 지원하지 않는 브라우저는 오류를 로그에 표시하며 연결은 유지합니다.
 
-## 현재 검증 범위 (2026-10-17)
+## 현재 검증 범위 (2026-10-18)
 
 - Node 자동 검사 15개 통과: 역할 제한, 정원, 잘못된 요청, 신호 형식/발신자 보호, 입퇴장,
   방 변경, 인증, TURN HMAC, Viewer 무캡처, 권한 대기 중 취소, 재접속, 짧은 TURN TTL 갱신.
 - 실제 브라우저: 테스트 패턴 → 일반 Viewer / OBS 모드 / 강제 TURN Viewer 동시 수신.
 - 1920×1080 30 FPS 수신, 송출 중 640×360 15 FPS 500 kbps 상한 변경 확인.
 - 실제 coturn UDP 인증 Allocate 성공. Sender 퇴장/복귀 후 Viewer 자동 재연결 확인.
-- 공개 Compose는 예시 환경값으로 구문 검증만 수행했으며 외부 배포하지 않았습니다.
+- 공개 Compose 구문과 이메일을 생략한 Caddy 설정 검증 통과. 실제 도메인 DNS 응답 확인.
+- 공개 구성의 로컬 HTTP 응답과 TURN 인증 Allocate 확인. 외부 ACME의 80/443 연결은 시간 초과하여 인증서 발급 실패.
+- 관리 권한이 없어 직접 공개를 중단하고 로컬 구성으로 복귀했습니다. 외부 영상 연결은 검증되지 않았습니다.
+- 별도 무료 터널의 HTTPS/API·접속 키·Origin 제한·WebSocket 확인. 같은 PC 브라우저에서 HTTPS로 입장해 일반/OBS Viewer 동시 수신 및 720p30 → 360p15 / 500 kbps 변경 확인.
 - 실물 카메라·마이크, 화면 공유 장치 선택, 실제 OBS 녹화, 외부망 접속 및 10명 부하 시험은 별도 확인이 필요합니다.
 
 ## 파일

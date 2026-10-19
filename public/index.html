@@ -34,6 +34,13 @@
           <div class="video-stage"><video id="mainVideo" autoplay playsinline muted></video><div id="waitingStatus" class="waiting"><span class="waiting-icon">◉</span><strong>방송을 준비하고 있습니다</strong><span>Sender로 송출하거나 Viewer로 입장하세요.</span></div><button id="btn-play" class="play-overlay" type="button" hidden>영상 재생 / 소리 켜기</button></div>
           <div class="video-toolbar chrome"><span id="statusDetail" aria-live="polite">소스를 선택하고 송출을 시작하세요.</span><div><button id="btn-mute" class="ghost" type="button">소리 켜기</button><button id="btn-fullscreen" class="ghost" type="button">전체 화면 ↗</button></div></div>
         </section>
+        <section class="panel chrome intercom-panel" aria-label="음성 인터컴">
+          <div class="section-top"><h2>음성 인터컴</h2><span id="intercomStatus" role="status">꺼짐</span></div>
+          <p class="muted">Sender와 Viewer가 별도로 대화합니다. 양쪽 모두 켜야 연결되며, 각 Viewer의 음성은 Sender에게만 전달됩니다. OBS 수신에는 포함되지 않습니다.</p>
+          <div class="intercom-actions"><button id="btn-intercom" class="secondary" type="button" disabled>인터컴 켜기</button><button id="btn-intercom-mute" class="secondary" type="button" disabled>인터컴 마이크 끄기</button><button id="btn-intercom-play" class="secondary" type="button" hidden>인터컴 소리 재생</button></div>
+          <p class="hint">방송용 마이크와 별도로 동작합니다. 하울링 방지를 위해 헤드폰을 사용하세요.</p>
+          <div id="intercomAudio"></div>
+        </section>
         <div class="telemetry chrome"><div><span class="metric-label">ACTUAL FORMAT</span><p id="actualSettings">아직 연결된 영상이 없습니다.</p></div><div><span class="metric-label">LIVE TRANSPORT</span><p id="transferStats">실측 전송률을 기다리고 있습니다.</p></div></div>
         <section class="share-panel panel chrome sender-only"><div class="section-top"><div><p class="eyebrow">SHARE YOUR SIGNAL</p><h2>시청자와 OBS를 연결하세요</h2></div><span class="step-label">02 / CONNECT</span></div><p class="muted">같은 방의 영상이 재생됩니다. 접속 키를 사용하는 링크는 초대한 사람에게만 공유하세요.</p><div class="share-actions"><button id="btn-copy-viewer" class="secondary" type="button">Viewer 링크 복사 <span>↗</span></button><button id="btn-copy-obs" class="secondary" type="button">OBS 링크 복사 <span>↗</span></button></div><details><summary>OBS에서 영상 소스로 사용하기</summary><p>소스 추가 → <b>브라우저</b> → 복사한 OBS URL 붙여넣기. 너비 1920, 높이 1080으로 설정하세요. 영상만 화면 전체에 표시됩니다.</p><p>오디오는 <b>OBS를 통해 오디오 제어</b>를 켜세요. 소리가 차단되면 소스의 <b>상호작용</b>에서 재생 버튼을 누르세요. 방송 중 연결을 유지하려면 ‘보이지 않을 때 소스 종료’를 끄세요.</p></details></section>
       </section>
@@ -43,7 +50,7 @@
       </aside>
       <section class="panel logs-panel chrome sender-only"><div class="section-top"><div><p class="eyebrow">KEEP AN EYE ON IT</p><h2>이벤트 로그</h2></div><button id="btn-clear-log" class="text-button" type="button">로그 지우기</button></div><ol id="logs" class="logs" aria-label="연결 이벤트 로그"></ol></section>
     </div>
-    <footer class="chrome"><span>FRAME / LIVE STUDIO</span><span>외부 송출은 HTTPS 주소에서 열어주세요. · 카메라와 마이크는 Sender에서만 사용합니다.</span></footer>
+    <footer class="chrome"><span>FRAME / LIVE STUDIO</span><span>외부 송출은 HTTPS 주소에서 열어주세요. · Viewer 마이크는 인터컴을 켤 때만 사용합니다.</span></footer>
   </main>
 </body>
 </html>

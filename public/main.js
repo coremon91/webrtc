@@ -1,6 +1,6 @@
 'use strict';
 (() => {
-  const ids = ['roleSelect','roomName','userName','accessKey','sourceSelect','resolution','fpsSelect','bitrateKbps','audioEnabled','btn-join','btn-leave','btn-apply','btn-mute','btn-fullscreen','btn-play','btn-copy-viewer','btn-copy-obs','btn-clear-log','status','statusDetail','viewerCount','peerCount','actualSettings','transferStats','viewerList','logs','mainVideo','waitingStatus'];
+  const ids = ['roleSelect','roomName','userName','accessKey','sourceSelect','resolution','fpsSelect','bitrateKbps','audioEnabled','btn-join','btn-leave','btn-apply','btn-mute','btn-fullscreen','btn-play','btn-copy-viewer','btn-copy-obs','btn-clear-log','status','statusDetail','viewerCount','peerCount','actualSettings','transferStats','viewerList','logs','mainVideo','waitingStatus','btn-intercom','btn-intercom-mute','btn-intercom-play','intercomStatus','intercomAudio'];
   const ui = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
   const query = new URLSearchParams(location.search);
   const obs = query.get('obs') === '1';
@@ -13,6 +13,134 @@
   document.documentElement.classList.toggle('obs-mode', obs);
   const current = run => active === run;
   const peerCurrent = (run, peer) => current(run) && run.joined && !peer.closed && run.peers.get(peer.id) === peer;
+  function talkUI(run) {
+    const talk = run?.talk;
+    ui['btn-intercom'].disabled = obs || !run?.joined;
+    ui['btn-intercom'].textContent = talk?.pending ? '마이크 요청 취소' : talk?.stream ? '인터컴 끄기' : '인터컴 켜기';
+    ui['btn-intercom'].ariaPressed = String(Boolean(talk?.stream));
+    ui['btn-intercom-mute'].disabled = !talk?.stream;
+    ui['btn-intercom-mute'].textContent = talk?.muted ? '인터컴 마이크 켜기' : '인터컴 마이크 끄기';
+    const count = talk ? [...talk.peers.values()].filter(p => p.pc.connectionState === 'connected').length : 0;
+    ui.intercomStatus.textContent = talk?.pending ? '마이크 권한 대기' : !talk?.stream ? '꺼짐' : talk.muted ? '마이크 꺼짐' : count ? `통화 중 · ${count}명` : '상대방의 인터컴 참여 대기';
+  }
+  function closeTalkPeer(run, peer) {
+    if (!peer) return;
+    peer.pc.ontrack = peer.pc.onicecandidate = peer.pc.onconnectionstatechange = null;
+    peer.pc.close(); peer.audio?.pause(); if (peer.audio) peer.audio.srcObject = null;
+    peer.audio?.remove(); clearTimeout(peer.timer);
+    if (run.talk.peers.get(peer.id) === peer) run.talk.peers.delete(peer.id);
+  }
+  function stopTalk(run, notify = true) {
+    const talk = run.talk;
+    talk.generation++; talk.pending = false;
+    talk.stream?.getTracks().forEach(t => t.stop()); talk.stream = null; talk.muted = false;
+    for (const p of [...talk.peers.values()]) closeTalkPeer(run, p);
+    talk.starting.clear(); talk.early.clear();
+    if (notify && run.socket?.connected && run.joined) run.socket.emit('intercom:toggle', false);
+    ui['btn-intercom-play'].hidden = true;
+    talkUI(current(run) ? run : null);
+  }
+  function talkCurrent(run, peer) {
+    return current(run) && run.joined && run.talk.stream && run.talk.peers.get(peer.id) === peer;
+  }
+  function talkEmit(run, peer, payload) {
+    if (talkCurrent(run, peer)) run.socket.emit('room:message', { to: peer.id, payload: { ...payload, sessionId: peer.sessionId, channel: 'intercom' } });
+  }
+  async function playTalk(run, peer) {
+    try { await peer.audio.play(); }
+    catch { if (talkCurrent(run, peer)) ui['btn-intercom-play'].hidden = false; }
+  }
+  function talkPeer(run, id, sessionId) {
+    const pc = new RTCPeerConnection({ iceServers: run.iceServers, iceTransportPolicy: relay ? 'relay' : 'all', bundlePolicy: 'max-bundle' });
+    const peer = { id, pc, sessionId, candidates: run.talk.early.get(`${id}:${sessionId}`) || [] };
+    run.talk.early.delete(`${id}:${sessionId}`);
+    run.talk.peers.set(id, peer);
+    run.talk.stream.getAudioTracks().forEach(track => pc.addTrack(track, run.talk.stream));
+    pc.onicecandidate = e => { if (e.candidate) talkEmit(run, peer, { kind: 'candidate', data: e.candidate.toJSON() }); };
+    pc.ontrack = e => {
+      if (!talkCurrent(run, peer) || e.track.kind !== 'audio') return;
+      if (!peer.audio) { peer.audio = document.createElement('audio'); peer.audio.autoplay = true; ui.intercomAudio.append(peer.audio); }
+      peer.audio.srcObject = new MediaStream([e.track]); playTalk(run, peer);
+    };
+    pc.onconnectionstatechange = () => {
+      if (!talkCurrent(run, peer)) return;
+      clearTimeout(peer.timer);
+      if (['failed', 'disconnected'].includes(pc.connectionState)) peer.timer = setTimeout(() => {
+        if (!talkCurrent(run, peer)) return;
+        closeTalkPeer(run, peer); talkUI(run);
+        log('인터컴 연결이 끊겼습니다. 인터컴을 껐다 켜서 다시 연결하세요.', 'warn');
+      }, pc.connectionState === 'failed' ? 0 : 8000);
+      talkUI(run);
+    };
+    return peer;
+  }
+  async function startTalkPeer(run, id) {
+    const talk = run.talk;
+    if (!talk.stream || talk.peers.has(id) || talk.starting.has(id)) return;
+    const generation = talk.generation; talk.starting.add(id);
+    let peer;
+    try {
+      await refreshIce(run);
+      if (!current(run) || !run.joined || generation !== talk.generation || !run.members.get(id)?.intercom) return;
+      peer = talkPeer(run, id, crypto.randomUUID());
+      await peer.pc.setLocalDescription(await peer.pc.createOffer());
+      talkEmit(run, peer, { kind: 'offer', sdp: peer.pc.localDescription.toJSON() });
+    } catch (e) {
+      if (peer) closeTalkPeer(run, peer);
+      if (current(run)) log(`인터컴 연결 실패: ${e.message}`, 'warn');
+    } finally { if (generation === talk.generation) talk.starting.delete(id); }
+  }
+  function syncTalk(run) {
+    for (const p of [...run.talk.peers.values()]) if (!run.members.get(p.id)?.intercom) closeTalkPeer(run, p);
+    if (run.role === 'sender' && run.talk.stream) for (const m of run.members.values()) {
+      if (m.role === 'viewer' && m.intercom) startTalkPeer(run, m.peerId);
+    }
+    talkUI(run);
+  }
+  async function talkSignal(run, { from, payload: p }) {
+    if (obs || !run.talk.stream || !run.members.get(from)?.intercom || typeof p.sessionId !== 'string') return;
+    let peer = run.talk.peers.get(from);
+    if (p.kind === 'offer' && run.role === 'viewer') {
+      if (peer?.sessionId === p.sessionId) return;
+      closeTalkPeer(run, peer); peer = talkPeer(run, from, p.sessionId);
+      await peer.pc.setRemoteDescription(p.sdp);
+      if (!talkCurrent(run, peer)) return;
+      for (const c of peer.candidates.splice(0)) await peer.pc.addIceCandidate(c);
+      if (!talkCurrent(run, peer)) return;
+      await peer.pc.setLocalDescription(await peer.pc.createAnswer());
+      talkEmit(run, peer, { kind: 'answer', sdp: peer.pc.localDescription.toJSON() });
+    } else if (p.kind === 'answer' && run.role === 'sender' && peer?.sessionId === p.sessionId && peer.pc.signalingState === 'have-local-offer') {
+      await peer.pc.setRemoteDescription(p.sdp);
+      if (talkCurrent(run, peer)) for (const c of peer.candidates.splice(0)) await peer.pc.addIceCandidate(c);
+    } else if (p.kind === 'candidate' && p.data) {
+      if (peer?.sessionId === p.sessionId) {
+        if (peer.pc.remoteDescription) await peer.pc.addIceCandidate(p.data);
+        else if (peer.candidates.length < 64) peer.candidates.push(p.data);
+      } else {
+        const key = `${from}:${p.sessionId}`, early = run.talk.early;
+        if (!early.has(key)) { if (early.size >= 16) early.delete(early.keys().next().value); early.set(key, []); }
+        if (early.get(key).length < 64) early.get(key).push(p.data);
+      }
+    }
+  }
+  async function toggleTalk() {
+    const run = active;
+    if (obs || !run?.joined) return;
+    const talk = run.talk;
+    if (talk.stream || talk.pending) { stopTalk(run); return; }
+    const generation = ++talk.generation; talk.pending = true; talkUI(run);
+    try {
+      if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) throw new Error('마이크는 HTTPS 또는 localhost에서 사용할 수 있습니다.');
+      const stream = await navigator.mediaDevices.getUserMedia({ video: false, audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      if (!current(run) || !run.joined || generation !== talk.generation) { stream.getTracks().forEach(t => t.stop()); return; }
+      if (!stream.getAudioTracks().length) { stream.getTracks().forEach(t => t.stop()); throw new Error('사용 가능한 마이크가 없습니다.'); }
+      talk.stream = stream; talk.pending = false;
+      stream.getAudioTracks().forEach(t => t.addEventListener('ended', () => { if (current(run) && talk.stream === stream) stopTalk(run); }));
+      run.socket.emit('intercom:toggle', true); syncTalk(run);
+    } catch (e) {
+      if (current(run) && generation === talk.generation) { stopTalk(run); ui.intercomStatus.textContent = `마이크 사용 실패: ${e.message}`; log(`인터컴: ${e.message}`, 'warn'); }
+    }
+  }
   function log(text, level = 'info') {
     const li = document.createElement('li'), time = document.createElement('time');
     time.textContent = new Date().toLocaleTimeString('ko-KR', { hour12: false });
@@ -36,6 +164,7 @@
     ui['btn-leave'].disabled = !running;
     ui['btn-apply'].disabled = !active?.joined || active.role !== 'sender';
     if (obs) ui.roleSelect.disabled = true;
+    talkUI(active);
   }
   function settings() {
     const [width, height] = ui.resolution.value.split('x').map(Number);
@@ -218,6 +347,7 @@
     const { from, payload: p } = packet;
     const member = run.members.get(from);
     if (!member || member.role === run.role || (run.role === 'viewer' && from !== run.senderId)) return;
+    if (p.channel === 'intercom') return talkSignal(run, packet);
     if (p.kind === 'retry' && run.role === 'sender') {
       const last = run.lastRetry.get(from) || 0;
       if (Date.now() - last < 1500) return;
@@ -278,7 +408,7 @@
     } else if (!run.senderId || oldSender && oldSender !== run.senderId) {
       clearPeers(run); waiting('Sender의 송출을 기다리고 있습니다.'); status('송출 대기', '방에 접속했습니다. Sender가 시작하면 자동으로 재생됩니다.');
     }
-    connectionCount(run);
+    syncTalk(run); connectionCount(run);
   }
   async function play(run) {
     if (!current(run)) return;
@@ -331,6 +461,7 @@
   function stop(message = '연결을 종료했습니다.') {
     const run = active; active = null;
     if (run) {
+      stopTalk(run);
       run.joined = false; clearInterval(run.statsTimer); clearPeers(run);
       run.captureCleanup?.(); run.local?.getTracks().forEach(t => t.stop());
       run.socket?.removeAllListeners(); run.socket?.disconnect();
@@ -347,6 +478,7 @@
     const room = ui.roomName.value.trim() || 'studio';
     if (!/^[a-zA-Z0-9_-]{1,64}$/.test(room)) { status('설정 확인', '방 이름은 영문·숫자·_·- 64자 이내로 입력하세요.'); return; }
     const run = { id: ++nextRun, role: ui.roleSelect.value, room, name: ui.userName.value.trim() || (obs ? 'OBS' : ui.roleSelect.value), key: ui.accessKey.value.trim(), source: ui.sourceSelect.value, audio: ui.audioEnabled.checked, quality, peers: new Map(), members: new Map(), starting: new Map(), early: new Map(), chains: new Map(), statsPrevious: new Map(), lastRetry: new Map(), retryCounts: new Map(), connectionGeneration: 0, joined: false, muted: false };
+    run.talk = { peers: new Map(), early: new Map(), starting: new Set(), generation: 0, stream: null, pending: false, muted: false };
     active = run; lock(true); status('준비 중', '접속 설정을 확인하고 있습니다.');
     try {
       await refreshIce(run, true); if (!current(run)) return;
@@ -385,6 +517,7 @@
       socket.on('room:rejected', packet => { if (current(run)) { log(packet.message, 'error'); stop(packet.message); status('입장 거부', packet.message); } });
       socket.on('disconnect', reason => {
         if (!current(run)) return;
+        stopTalk(run, false);
         run.connectionGeneration++; run.joined = false; run.selfId = null; run.members.clear(); run.senderId = null; clearPeers(run); lock(true);
         ui.viewerCount.textContent = '0'; ui.viewerList.replaceChildren(); document.body.classList.remove('is-active');
         status('재접속 중', '서버 연결을 복구하고 있습니다. 종료 버튼으로 취소할 수 있습니다.'); log(`서버 연결 끊김 · ${reason}`, 'warn');
@@ -437,6 +570,17 @@
     try { await navigator.clipboard.writeText(url.href); log(`${forObs ? 'OBS' : 'Viewer'} 링크를 복사했습니다.`); }
     catch { window.prompt('아래 링크를 복사하세요. 접속 키가 포함된 링크는 안전하게 공유하세요.', url.href); }
   }
+  ui['btn-intercom'].addEventListener('click', toggleTalk);
+  ui['btn-intercom-mute'].addEventListener('click', () => {
+    if (!active?.talk.stream) return;
+    const talk = active.talk; talk.muted = !talk.muted;
+    talk.stream.getAudioTracks().forEach(t => { t.enabled = !talk.muted; }); talkUI(active);
+  });
+  ui['btn-intercom-play'].addEventListener('click', async () => {
+    const run = active; if (!run) return;
+    ui['btn-intercom-play'].hidden = true;
+    await Promise.all([...run.talk.peers.values()].filter(p => p.audio).map(p => playTalk(run, p)));
+  });
   ui.roleSelect.addEventListener('change', mode);
   ui['btn-join'].addEventListener('click', start);
   ui['btn-leave'].addEventListener('click', () => { log('사용자가 연결을 종료했습니다.'); stop(); });

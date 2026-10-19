@@ -19,6 +19,7 @@ class Element {
   querySelector(tag) { return this.children.find(child => child.tag === tag) || null; }
   addEventListener(name, callback) { this.events[name] = callback; }
   click() { return this.events.click?.(); }
+  pause() { this.paused = true; }
   play() { this.paused = false; return Promise.resolve(); }
 }
 function fixture(options = {}) {
@@ -32,7 +33,7 @@ function fixture(options = {}) {
   for (const [id, value] of Object.entries({ resolution: '1280x720', fpsSelect: '30', bitrateKbps: '2500', sourceSelect: 'camera' })) get(id).value = value;
   get('audioEnabled').checked = true;
   let cameraCalls = 0, fetchCalls = 0, socket;
-  const location = new URL('http://localhost:3000/?role=' + (options.role || 'sender'));
+  const location = new URL('http://localhost:3000/?role=' + (options.role || 'sender') + (options.obs ? '&obs=1' : ''));
   const sent = [];
   const io = () => {
     const handlers = {};
@@ -49,7 +50,18 @@ function fixture(options = {}) {
     };
     return socket;
   };
-  const context = vm.createContext({ document, location, URL, URLSearchParams, io, crypto: require('node:crypto').webcrypto,
+  const pcs = [];
+  class PeerConnection {
+    constructor() { this.connectionState = 'new'; this.signalingState = 'stable'; this.tracks = []; pcs.push(this); }
+    addTrack(track) { this.tracks.push(track); }
+    async createOffer() { return { type: 'offer', sdp: 'audio-offer' }; }
+    async createAnswer() { return { type: 'answer', sdp: 'audio-answer' }; }
+    async setLocalDescription(sdp) { this.localDescription = { ...sdp, toJSON: () => sdp }; this.signalingState = sdp.type === 'offer' ? 'have-local-offer' : 'stable'; }
+    async setRemoteDescription(sdp) { this.remoteDescription = sdp; }
+    async addIceCandidate() {}
+    close() { this.connectionState = 'closed'; }
+  }
+  const context = vm.createContext({ document, location, URL, URLSearchParams, io, RTCPeerConnection: PeerConnection, crypto: require('node:crypto').webcrypto,
     window: { isSecureContext: true, addEventListener() {}, prompt() {} },
     navigator: { mediaDevices: { getUserMedia() { cameraCalls++; return options.media?.() || Promise.reject(new Error('No camera')); } } },
     fetch: async () => { fetchCalls++; return { status: options.authFailure ? 401 : 200, ok: !options.authFailure,
@@ -58,7 +70,7 @@ function fixture(options = {}) {
     setInterval: fn => { intervals.set(++nextInterval, fn); return nextInterval; }, clearInterval: id => intervals.delete(id), queueMicrotask, console
   });
   vm.runInContext(source, context);
-  return { get, sent, advance: ms => { clock += ms; }, poll: async () => { for (const fn of intervals.values()) await fn(); },
+  return { get, sent, pcs, advance: ms => { clock += ms; }, poll: async () => { for (const fn of intervals.values()) await fn(); },
     get socket() { return socket; }, get cameraCalls() { return cameraCalls; }, get fetchCalls() { return fetchCalls; } };
 }
 function stream() {
@@ -110,4 +122,62 @@ test('60-second TURN credentials refresh once near expiry without a two-second r
   f.advance(42000); await f.poll(); assert.equal(f.fetchCalls, before);
   f.advance(2000); await f.poll(); assert.equal(f.fetchCalls, before + 1);
   await f.poll(); assert.equal(f.fetchCalls, before + 1);
+});
+
+function microphone() {
+  const track = { kind: 'audio', enabled: true, stopped: false, stop() { this.stopped = true; }, addEventListener() {} };
+  return { track, getTracks: () => [track], getAudioTracks: () => [track] };
+}
+
+test('intercom is opt-in, microphone toggles, and disabling releases capture', async t => {
+  const mic = microphone(), f = fixture({ role: 'viewer', media: async () => mic });
+  t.after(() => f.get('btn-leave').click());
+  await f.get('btn-join').click(); await tick();
+  assert.equal(f.cameraCalls, 0);
+  await f.get('btn-intercom').click();
+  assert.equal(f.cameraCalls, 1);
+  assert(f.sent.some(e => e.name === 'intercom:toggle' && e.packet === true));
+  f.get('btn-intercom-mute').click(); assert.equal(mic.track.enabled, false);
+  f.get('btn-intercom-mute').click(); assert.equal(mic.track.enabled, true);
+  await f.get('btn-intercom').click(); assert.equal(mic.track.stopped, true);
+  assert.equal(f.sent.at(-1).packet, false);
+});
+
+test('cancelled intercom permission stops a late microphone without advertising participation', async t => {
+  let resolve;
+  const f = fixture({ role: 'viewer', media: () => new Promise(r => { resolve = r; }) });
+  t.after(() => f.get('btn-leave').click());
+  await f.get('btn-join').click(); await tick();
+  const pending = f.get('btn-intercom').click();
+  await f.get('btn-intercom').click();
+  const mic = microphone(); resolve(mic); await pending;
+  assert.equal(mic.track.stopped, true);
+  assert(!f.sent.some(e => e.name === 'intercom:toggle' && e.packet === true));
+});
+
+test('intercom answer uses separate audio peer and disconnect releases microphone', async t => {
+  const mic = microphone(), f = fixture({ role: 'viewer', media: async () => mic });
+  t.after(() => f.get('btn-leave').click());
+  await f.get('btn-join').click(); await tick();
+  await f.get('btn-intercom').click();
+  f.socket.handlers['room:state']({ room: 'studio', senderId: 'sender', viewerCount: 1, members: [
+    { peerId: 'self-1', role: 'viewer', intercom: true }, { peerId: 'sender', role: 'sender', intercom: true }
+  ] });
+  f.socket.handlers['room:signal']({ from: 'sender', payload: { channel: 'intercom', kind: 'offer', sessionId: 'talk-1', sdp: { type: 'offer', sdp: 'audio' } } });
+  await tick();
+  assert.equal(f.pcs.length, 1); assert.equal(f.pcs[0].tracks[0], mic.track);
+  assert.equal(f.get('mainVideo').srcObject, null);
+  assert(f.sent.some(e => e.packet?.payload?.channel === 'intercom' && e.packet.payload.kind === 'answer'));
+  f.socket.handlers.disconnect('transport close');
+  assert.equal(mic.track.stopped, true); assert.equal(f.pcs[0].connectionState, 'closed');
+});
+
+test('microphone rejection leaves video session usable and OBS never captures intercom', async t => {
+  const f = fixture({ role: 'viewer' }); t.after(() => f.get('btn-leave').click());
+  await f.get('btn-join').click(); await tick(); await f.get('btn-intercom').click();
+  assert.match(f.get('intercomStatus').textContent, /마이크 사용 실패/);
+  assert.equal(f.socket.connected, true); assert.equal(f.get('btn-intercom').disabled, false);
+  const obs = fixture({ obs: true }); t.after(() => obs.get('btn-leave').click());
+  await tick(); await obs.get('btn-intercom').click();
+  assert.equal(obs.cameraCalls, 0); assert.equal(obs.get('btn-intercom').disabled, true);
 });

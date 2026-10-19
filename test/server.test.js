@@ -154,3 +154,26 @@ test('invalid numeric configuration falls back and TTL is bounded', async t => {
   const bounded = await fetch(`${lower.url}/api/turn-credentials`).then(r => r.json());
   assert(Math.abs(bounded.expireAt - Math.floor(Date.now() / 1000) - 60) <= 2);
 });
+
+
+test('intercom relays only between participating opposite roles in the same room', async t => {
+  const f = await fixture(t), s = await f.client(), v = await f.client(), other = await f.client();
+  await f.join(s, 'sender'); await f.join(v, 'viewer'); await f.join(other, 'viewer');
+  const set = async (socket, enabled) => {
+    const state = event(s, 'room:state', p => p.members.some(m => m.peerId === socket.id && m.intercom === enabled));
+    socket.emit('intercom:toggle', enabled); await state;
+  };
+  const payload = { channel: 'intercom', kind: 'offer', sessionId: 'talk', sdp: { type: 'offer', sdp: 'audio-only' } };
+  const received = []; v.on('room:signal', p => received.push(p));
+  s.emit('room:message', { to: v.id, payload }); await pause(30); assert.equal(received.length, 0);
+  await set(s, true); await set(v, true);
+  let ready = event(v, 'room:signal'); s.emit('room:message', { to: v.id, payload });
+  assert.equal((await ready).payload.channel, 'intercom');
+  ready = event(s, 'room:signal');
+  v.emit('room:message', { to: s.id, payload: { ...payload, kind: 'answer', sdp: { type: 'answer', sdp: 'audio-answer' } } });
+  assert.equal((await ready).payload.channel, 'intercom');
+  await set(v, false); const before = received.length;
+  s.emit('room:message', { to: v.id, payload }); await pause(30); assert.equal(received.length, before);
+  await set(v, true); await set(other, true);
+  other.emit('room:message', { to: v.id, payload }); await pause(30); assert.equal(received.length, before);
+});

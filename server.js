@@ -95,6 +95,12 @@ function createServer(env = process.env) {
   });
   io.on('connection', socket => {
     let signalWindow = Date.now(), signalCount = 0;
+    socket.on('intercom:toggle', enabled => {
+      const member = rooms.get(socket.data.room)?.members.get(socket.id);
+      if (!member || typeof enabled !== 'boolean' || member.intercom === enabled) return;
+      member.intercom = enabled;
+      broadcast(socket.data.room);
+    });
     socket.on('room:join', packet => {
       const reject = (code, message) => socket.emit('room:rejected', { code, message });
       if (!isRecord(packet) || (packet.room !== undefined && typeof packet.room !== 'string') ||
@@ -131,6 +137,8 @@ function createServer(env = process.env) {
       const target = io.sockets.sockets.get(packet.to);
       if (!source || !targetMember || !target || target.data.room !== socket.data.room || source.role === targetMember.role) return;
       const p = packet.payload;
+      if (p.channel !== undefined && p.channel !== 'intercom') return;
+      if (p.channel === 'intercom' && (!source.intercom || !targetMember.intercom)) return;
       let payload;
       if (p.kind === 'retry' && source.role === 'viewer') payload = { kind: 'retry' };
       else {
@@ -150,6 +158,7 @@ function createServer(env = process.env) {
           if (JSON.stringify(payload.data).length > 8192) return;
         } else return;
       }
+      if (p.channel === 'intercom') payload.channel = 'intercom';
       target.emit('room:signal', { from: socket.id, name: source.name, payload });
     });
     socket.on('room:leave', () => leave(socket));
